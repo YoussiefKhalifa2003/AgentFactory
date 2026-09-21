@@ -232,6 +232,7 @@ async def openai_chat(
         "model": model,
         "messages": messages,
         "temperature": 0.3,
+        "max_tokens": 8192,
     }
     if tools:
         payload["tools"] = tools
@@ -583,7 +584,7 @@ async def openai_chat_stream(
         "model": model,
         "messages": messages,
         "temperature": 0.3,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "stream": True,
     }
     if tools:
@@ -721,7 +722,7 @@ async def ollama_chat_stream(
         "messages": _ollama_messages(messages),
         "stream": True,
         "think": False,
-        "options": {"temperature": 0.3, "num_predict": 4096},
+        "options": {"temperature": 0.3, "num_predict": 8192},
     }
     if tools:
         payload["tools"] = tools

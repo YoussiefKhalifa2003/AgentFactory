@@ -344,12 +344,14 @@ function FilePreview({
   onClose: () => void;
 }) {
   const [text, setText] = useState<string | null>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
   const html = isHtmlFile(file);
   const image = isImageFile(file);
   const drawio = isDrawioFile(file);
   const mermaid = isMermaidFile(file);
   const sheet = isSheetFile(file);
   const pdf = isPdfFile(file);
+  const pageUrl = html ? previewSrc(jobId, file) : "";
 
   useEffect(() => {
     if (html || image || pdf) return;
@@ -372,19 +374,24 @@ function FilePreview({
       if (e.key === "Escape") onClose();
     }
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
   }, [onClose]);
 
   const wide = drawio || mermaid || sheet || pdf || html;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(28,24,20,0.45)] p-5 sm:p-8"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(28,24,20,0.45)] p-3 sm:p-5"
       onClick={onClose}
     >
       <div
-        className={`flex max-h-[90vh] w-full flex-col overflow-hidden rounded-[28px] bg-[var(--paper)] shadow-xl ${
-          wide ? "max-w-6xl" : "max-w-4xl"
+        className={`flex max-h-[96vh] w-full flex-col overflow-hidden rounded-[28px] bg-[var(--paper)] shadow-xl ${
+          wide ? "max-w-[96vw]" : "max-w-4xl"
         }`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -396,6 +403,11 @@ function FilePreview({
             <p className="truncate text-sm font-medium">{file.name}</p>
           </div>
           <div className="flex shrink-0 gap-2">
+            {html && (
+              <a className="btn" href={pageUrl} target="_blank" rel="noreferrer">
+                Open full page
+              </a>
+            )}
             <a className="btn" href={downloadSrc(file)}>
               Download
             </a>
@@ -404,12 +416,17 @@ function FilePreview({
             </button>
           </div>
         </div>
-        <div className="min-h-0 flex-1 bg-white">
+        <div className="min-h-0 flex-1 bg-black">
           {html ? (
             <iframe
+              ref={frameRef}
               title={file.name}
-              src={previewSrc(jobId, file)}
-              className="h-[70vh] w-full border-0"
+              src={pageUrl}
+              className="h-[min(82vh,920px)] w-full border-0 bg-black"
+              allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write"
+              allowFullScreen
+              tabIndex={0}
+              onLoad={() => frameRef.current?.focus()}
             />
           ) : image ? (
             <img
@@ -430,7 +447,7 @@ function FilePreview({
           ) : drawio && text && text.trim().startsWith("<") ? (
             <DrawioEmbed xml={text} />
           ) : (
-            <pre className="max-h-[70vh] overflow-auto p-4 text-sm whitespace-pre-wrap">
+            <pre className="max-h-[70vh] overflow-auto bg-white p-4 text-sm whitespace-pre-wrap">
               {text ?? "Loading…"}
             </pre>
           )}

@@ -12,7 +12,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,7 @@ import db
 import harness
 import lists
 import llm
+import local
 import meetings
 import sandbox
 import strengths as skillset
@@ -329,24 +330,55 @@ async def artifact_file(artifact_id: str, download: bool = Query(False)) -> File
     )
 
 
+SITE_MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".ogg": "audio/ogg",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+}
+
+
 @app.get("/api/jobs/{job_id}/site/{path:path}")
-async def job_site(job_id: str, path: str) -> FileResponse:
+async def job_site(job_id: str, path: str):
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(404, "job not found")
     rel = (path or "").strip() or "index.html"
+    ws = sandbox.workspace(job["agent_id"], job_id)
     try:
-        full = sandbox.resolve(sandbox.workspace(job["agent_id"], job_id), rel)
+        full = sandbox.resolve(ws, rel)
     except ValueError:
         raise HTTPException(404, "invalid path") from None
     if not full.is_file():
         raise HTTPException(404, "file missing")
-    mime = mimetypes.guess_type(str(full))[0] or "application/octet-stream"
+    suffix = full.suffix.lower()
+    mime = SITE_MIME.get(suffix) or mimetypes.guess_type(str(full))[0] or "application/octet-stream"
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if suffix in {".html", ".htm"}:
+        html = local.assemble_page(ws, full.read_text(encoding="utf-8", errors="replace"))
+        return HTMLResponse(html, media_type="text/html; charset=utf-8", headers=headers)
     return FileResponse(
         full,
         media_type=mime,
         filename=full.name,
         content_disposition_type="inline",
+        headers=headers,
     )
 
 

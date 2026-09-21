@@ -52,11 +52,193 @@ def decode_written_text(text: str) -> str:
     return blob
 
 
+TAIL_MARKDOWN = re.compile(
+    r"\n(?:Here are the files\b|The (?:HTML|CSS|JavaScript|JS|files)\b|### (?:index\.html|styles\.css|script\.js)|Wrote (?:index|styles|script)\b|\*\*(?:index\.html|styles\.css|script\.js)\*\*)",
+    re.I,
+)
+
+
+def strip_model_tail(text: str) -> str:
+    """Cut off chat recap that models append after a real file body."""
+    blob = text or ""
+    m = TAIL_MARKDOWN.search(blob)
+    if m and m.start() > 40:
+        blob = blob[: m.start()].rstrip()
+    return blob
+
+
+def tidy_site_file(rel: str, content: str) -> str:
+    body = decode_written_text(content or "")
+    low = (rel or "").replace("\\", "/").lower()
+    if low.endswith((".js", ".css", ".html", ".htm")):
+        body = strip_model_tail(body)
+    return body
+
+
 def _safe_asset_name(rel: str, fallback: str) -> str:
     name = (rel or "").replace("\\", "/").split("?")[0].lstrip("/")
-    if not name or ".." in name or "/" in name.strip("/"):
+    if not name or ".." in name:
         return fallback
-    return name or fallback
+    if not re.match(r"^[A-Za-z0-9._/-]+$", name):
+        return fallback
+    return name
+
+
+def _code_balanced(text: str) -> bool:
+    curly = round_ = square = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in {'"', "'", "`"}:
+            quote = ch
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "{":
+            curly += 1
+        elif ch == "}":
+            curly -= 1
+        elif ch == "(":
+            round_ += 1
+        elif ch == ")":
+            round_ -= 1
+        elif ch == "[":
+            square += 1
+        elif ch == "]":
+            square -= 1
+        if curly < 0 or round_ < 0 or square < 0:
+            return False
+        i += 1
+    return curly == 0 and round_ == 0 and square == 0
+
+
+def js_looks_complete(text: str) -> bool:
+    blob = strip_model_tail(text or "").strip()
+    if len(blob) < 20:
+        return False
+    if re.search(r"</html>|</style>|^#{1,3} ", blob, re.M | re.I):
+        return False
+    return _code_balanced(blob)
+
+
+def site_gap(ws: Path) -> str | None:
+    """If a page is missing or cut off, ask the model to finish the files."""
+    files = sandbox.list_files(ws)
+    htmls = [f for f in files if f.endswith((".html", ".htm"))]
+    if not htmls:
+        return None
+    html = sandbox.read_file(ws, htmls[0])
+    interactive = bool(
+        re.search(
+            r"<canvas\b|requestAnimationFrame|addEventListener|onclick=|keydown|game",
+            html,
+            re.I,
+        )
+    )
+    js_files = [f for f in files if f.endswith(".js")]
+    has_inline = bool(SCRIPT_BLOCK.search(html))
+    linked = [ _safe_asset_name(m, "") for m in SCRIPT_SRC.findall(html) ]
+    linked = [n for n in linked if n]
+    if interactive or linked:
+        missing = [n for n in linked if n not in files]
+        if missing:
+            return (
+                f"{missing[0]} is linked from the page but missing. "
+                "write_file the COMPLETE file now. Raw source only, no markdown."
+            )
+        if not js_files and not has_inline:
+            return (
+                "This page needs script.js to be interactive. "
+                "write_file the COMPLETE script.js now. Raw source only, no markdown."
+            )
+        for name in js_files or linked:
+            if name not in files:
+                continue
+            body = sandbox.read_file(ws, name)
+            tidy = strip_model_tail(body)
+            if tidy != body:
+                sandbox.write_file(ws, name, tidy)
+                body = tidy
+            if not js_looks_complete(body):
+                return (
+                    f"{name} was cut off. write_file the complete file from the first line "
+                    "to the last closing brace. Raw JavaScript only. No markdown."
+                )
+    css_files = [f for f in files if f.endswith(".css")]
+    for name in css_files:
+        body = sandbox.read_file(ws, name)
+        tidy = strip_model_tail(body)
+        if tidy != body:
+            sandbox.write_file(ws, name, tidy)
+    return None
+
+
+def assemble_page(ws: Path, html: str) -> str:
+    """Inline local CSS/JS so View is one complete, interactive document."""
+    blob = decode_written_text(html or "")
+    files = set(sandbox.list_files(ws))
+
+    def swap_css(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        if "stylesheet" not in tag.lower():
+            return tag
+        href_m = re.search(r"""href=["']([^"']+)["']""", tag, re.I)
+        if not href_m:
+            return tag
+        href = href_m.group(1)
+        if href.startswith(("http://", "https://", "//", "data:")):
+            return tag
+        name = _safe_asset_name(href, "")
+        if not name or name not in files:
+            return tag
+        css = strip_model_tail(sandbox.read_file(ws, name))
+        return f"<style>\n{css}\n</style>"
+
+    blob = re.sub(r"<link\b[^>]*>", swap_css, blob, flags=re.I)
+
+    def swap_js(match: re.Match[str]) -> str:
+        tag, attrs, _inner = match.group(0), match.group(1) or "", match.group(2)
+        src_m = re.search(r"""src=["']([^"']+)["']""", attrs, re.I)
+        if not src_m:
+            return tag
+        src = src_m.group(1)
+        if src.startswith(("http://", "https://", "//", "data:")):
+            return tag
+        name = _safe_asset_name(src, "")
+        if not name or name not in files:
+            return tag
+        js = strip_model_tail(sandbox.read_file(ws, name))
+        type_m = re.search(r"""type=["']([^"']+)["']""", attrs, re.I)
+        extra = f' type="{type_m.group(1)}"' if type_m else ""
+        return f"<script{extra}>\n{js}\n</script>"
+
+    blob = re.sub(
+        r"<script\b([^>]*)>(.*?)</script>",
+        swap_js,
+        blob,
+        flags=re.I | re.S,
+    )
+    if "styles.css" in files and not STYLE_BLOCK.search(blob):
+        blob = _inject_once(
+            blob,
+            "<style>\n" + strip_model_tail(sandbox.read_file(ws, "styles.css")) + "\n</style>",
+            "</head>",
+        )
+    if "script.js" in files and not SCRIPT_SRC.search(blob) and not SCRIPT_BLOCK.search(blob):
+        blob = _inject_once(
+            blob,
+            "<script>\n" + strip_model_tail(sandbox.read_file(ws, "script.js")) + "\n</script>",
+            "</body>",
+        )
+    return blob
 
 
 def extract_embedded_assets(html: str) -> list[tuple[str, str]]:
@@ -100,6 +282,12 @@ def materialize_site(ws: Path, extra_text: str = "") -> list[str]:
             sandbox.write_file(ws, rel, body)
             files.add(rel)
             added.append(rel)
+    for name in list(files):
+        if name.endswith((".js", ".css", ".html", ".htm")):
+            raw = sandbox.read_file(ws, name)
+            tidy = tidy_site_file(name, raw)
+            if tidy != raw:
+                sandbox.write_file(ws, name, tidy)
     css_dump = maybe_css_source(extra_text)
     if css_dump and "styles.css" not in files:
         sandbox.write_file(ws, "styles.css", css_dump)

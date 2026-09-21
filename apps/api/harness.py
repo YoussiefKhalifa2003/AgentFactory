@@ -152,7 +152,7 @@ TEXT_PROTOCOL = """
 Write the finished answer only.
 Do not show thinking, plans, or tool JSON.
 Tools are optional. Prefer answering in the reply if a file is not required.
-A website needs index.html plus styles.css (and script.js if it is interactive). Write those files. Do not JSON-escape them.
+A website or game needs index.html plus styles.css and script.js, all complete. Write those files. Do not JSON-escape them. Do not put a recap inside the files.
 Use fetch_url only for a normal page the user asked you to open.
 """
 
@@ -976,7 +976,7 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
 
         try:
             allow_tools = _use_tools(agent, prompt)
-            for _round_i in range(3):
+            for _round_i in range(5):
                 data, used_model = await _complete_with_failover(
                     messages,
                     [used_model],
@@ -1025,6 +1025,11 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                             }
                         )
                     local.materialize_site(ws, content)
+                    gap = local.site_gap(ws)
+                    if gap:
+                        messages.append({"role": "user", "content": gap})
+                        allow_tools = True
+                        continue
                     allow_tools = False
                     continue
 
@@ -1036,6 +1041,11 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                     leftover = await _save_desk_files(content, content, ws, job, agent, broadcast)
                     transcripts = []
                 if transcripts:
+                    gap = local.site_gap(ws)
+                    if gap:
+                        messages.append({"role": "user", "content": gap})
+                        allow_tools = True
+                        continue
                     messages.append(
                         {
                             "role": "user",
@@ -1057,6 +1067,11 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                         output_parts.append(leftover)
                         if not pump.streamed:
                             pump.push(leftover, "text")
+                gap = local.site_gap(ws)
+                if gap:
+                    messages.append({"role": "user", "content": gap})
+                    allow_tools = True
+                    continue
                 break
 
             final_text = "\n".join(output_parts).strip()
