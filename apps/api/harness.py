@@ -151,6 +151,7 @@ TEXT_PROTOCOL = """
 Write the finished answer only.
 Do not show thinking, plans, or tool JSON.
 Tools are optional. Prefer answering in the reply if a file is not required.
+A website needs index.html plus styles.css (and script.js if it is interactive). Write those files. Do not JSON-escape them.
 Use fetch_url only for a normal page the user asked you to open.
 """
 
@@ -286,6 +287,12 @@ def _collect_artifacts(job: dict[str, Any], agent: dict[str, Any], ws: Path, bro
             kind = "plot"
         elif suffix in {".html", ".htm"}:
             kind = "site"
+        elif suffix == ".css":
+            kind = "file"
+            mime = "text/css"
+        elif suffix == ".js":
+            kind = "file"
+            mime = "text/javascript"
         elif suffix in {".drawio", ".mmd"}:
             kind = "diagram"
             mime = "application/xml" if suffix == ".drawio" else "text/plain"
@@ -584,21 +591,24 @@ async def _apply_text_actions(
             transcripts.append(await _run_named_tool(ws, name, args, job, agent, broadcast))
 
     leftover = await _save_desk_files(content, leftover, ws, job, agent, broadcast)
-    if xml:
-        return transcripts, leftover
 
     strengths = agent.get("strengths") or []
     if "coding" in strengths or "maths" in strengths:
+        present = set(sandbox.list_files(ws))
         for rel, body in local.extract_fences(content):
-            if rel.endswith((".py", ".md", ".html", ".css", ".js")):
-                await _run_named_tool(
-                    ws, "write_file", {"path": rel, "content": body}, job, agent, broadcast
+            if not rel.endswith((".py", ".md", ".html", ".css", ".js")):
+                continue
+            if rel in present:
+                continue
+            await _run_named_tool(
+                ws, "write_file", {"path": rel, "content": body}, job, agent, broadcast
+            )
+            transcripts.append(rel)
+            present.add(rel)
+            if rel.endswith(".py"):
+                transcripts.append(
+                    await _run_named_tool(ws, "run_python", {"path": rel}, job, agent, broadcast)
                 )
-                transcripts.append(rel)
-                if rel.endswith(".py"):
-                    transcripts.append(
-                        await _run_named_tool(ws, "run_python", {"path": rel}, job, agent, broadcast)
-                    )
         leftover = local.FENCE.sub("", leftover).strip()
         html = local.maybe_html_source(leftover)
         has_html = any(f.endswith(".html") for f in sandbox.list_files(ws))
@@ -610,6 +620,7 @@ async def _apply_text_actions(
             has_html = True
         if html and has_html:
             leftover = leftover.replace(html, "").strip() or "Built a page. Use View on this desk."
+        local.materialize_site(ws, content)
     py = local.maybe_python_source(leftover)
     if py and ("coding" in strengths or "maths" in strengths):
         await _run_named_tool(
@@ -806,6 +817,7 @@ async def _finish(
     job = db.get_job(job_id)
     if not job:
         return
+    local.materialize_site(ws, output)
     _collect_artifacts(job, agent, ws, broadcast)
     ok, note = _verify(agent, ws, prompt, output)
     if not ok:
@@ -989,6 +1001,7 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                             "content": result[:12_000],
                         }
                     )
+                local.materialize_site(ws, content)
                 allow_tools = False
                 continue
 

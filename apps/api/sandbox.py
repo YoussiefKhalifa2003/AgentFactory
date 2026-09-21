@@ -35,7 +35,9 @@ def resolve(ws: Path, rel: str) -> Path:
 
 
 def write_file(ws: Path, rel: str, content: str) -> str:
-    return write_bytes(ws, rel, content.encode("utf-8"))
+    import local as _local
+
+    return write_bytes(ws, rel, _local.decode_written_text(content or "").encode("utf-8"))
 
 
 def write_bytes(ws: Path, rel: str, data: bytes) -> str:

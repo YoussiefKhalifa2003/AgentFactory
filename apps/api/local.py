@@ -12,19 +12,123 @@ from urllib.parse import quote
 import sandbox
 
 GREET = re.compile(r"^(hi|hello|hey|yo|thanks|thank you)[\s!.?]*$", re.I)
-FENCE = re.compile(r"```(?:([\w./+-]+)\n)?(.*?)```", re.S)
+FENCE = re.compile(r"```(?:\s*([\w./+-]+)\s*\n)?(.*?)```", re.S)
 ARITH = re.compile(r"^[0-9.\s+\-*/()]+$")
 URLS = re.compile(r"https?://[^\s)>\]]+")
+STYLE_BLOCK = re.compile(r"<style\b[^>]*>(.*?)</style>", re.S | re.I)
+SCRIPT_BLOCK = re.compile(r"<script\b(?![^>]*\bsrc\b)[^>]*>(.*?)</script>", re.S | re.I)
+LINK_CSS = re.compile(r"""<link\b[^>]*href=["']([^"']+\.css)["']""", re.I)
+SCRIPT_SRC = re.compile(r"""<script\b[^>]*src=["']([^"']+\.js)["']""", re.I)
 
 
 def is_smalltalk(prompt: str) -> bool:
     return bool(GREET.match(prompt.strip()))
 
 
+def decode_written_text(text: str) -> str:
+    """Models often JSON-escape file bodies (\\n, \\t, \\'). Turn those into a real file."""
+    if not text:
+        return text
+    blob = text
+    stripped = blob.strip()
+    if stripped.startswith('"') and stripped.endswith('"') and "\\n" in stripped[:120]:
+        try:
+            loaded = json.loads(stripped)
+            if isinstance(loaded, str) and loaded:
+                blob = loaded
+        except json.JSONDecodeError:
+            pass
+    escaped_n = blob.count("\\n")
+    real_n = blob.count("\n")
+    if escaped_n >= 3 and real_n <= 2:
+        blob = (
+            blob.replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\r", "\n")
+            .replace("\\t", "\t")
+            .replace("\\'", "'")
+            .replace('\\"', '"')
+        )
+    return blob
+
+
+def _safe_asset_name(rel: str, fallback: str) -> str:
+    name = (rel or "").replace("\\", "/").split("?")[0].lstrip("/")
+    if not name or ".." in name or "/" in name.strip("/"):
+        return fallback
+    return name or fallback
+
+
+def extract_embedded_assets(html: str) -> list[tuple[str, str]]:
+    """Pull <style> / inline <script> out of a page so the desk has real CSS and JS files."""
+    blob = decode_written_text(html or "")
+    if not blob:
+        return []
+    out: list[tuple[str, str]] = []
+    css_name = "styles.css"
+    link = LINK_CSS.search(blob)
+    if link:
+        css_name = _safe_asset_name(link.group(1), "styles.css")
+    css = "\n\n".join(block.strip() for block in STYLE_BLOCK.findall(blob) if block.strip())
+    if css:
+        out.append((css_name, css))
+    js_name = "script.js"
+    src = SCRIPT_SRC.search(blob)
+    if src:
+        js_name = _safe_asset_name(src.group(1), "script.js")
+    js = "\n\n".join(block.strip() for block in SCRIPT_BLOCK.findall(blob) if block.strip())
+    if js:
+        out.append((js_name, js))
+    return out
+
+
+def _inject_once(html: str, tag: str, closer: str) -> str:
+    if tag in html:
+        return html
+    pattern = re.compile(re.escape(closer), re.I)
+    if pattern.search(html):
+        return pattern.sub(tag + "\n" + closer, html, count=1)
+    return html
+
+
+def materialize_site(ws: Path, extra_text: str = "") -> list[str]:
+    """Fix escaped HTML and make sure linked CSS/JS exist on the desk."""
+    added: list[str] = []
+    files = set(sandbox.list_files(ws))
+    for rel, body in extract_fences(extra_text):
+        if rel.endswith((".css", ".js", ".html")) and rel not in files and body.strip():
+            sandbox.write_file(ws, rel, body)
+            files.add(rel)
+            added.append(rel)
+    css_dump = maybe_css_source(extra_text)
+    if css_dump and "styles.css" not in files:
+        sandbox.write_file(ws, "styles.css", css_dump)
+        files.add("styles.css")
+        added.append("styles.css")
+    for rel in [f for f in files if f.endswith((".html", ".htm"))]:
+        raw = sandbox.read_file(ws, rel)
+        fixed = decode_written_text(raw)
+        if fixed != raw:
+            sandbox.write_file(ws, rel, fixed)
+            raw = fixed
+        for path, body in extract_embedded_assets(raw):
+            if path not in files and body.strip():
+                sandbox.write_file(ws, path, body)
+                files.add(path)
+                added.append(path)
+        if "styles.css" in files and not LINK_CSS.search(raw) and not STYLE_BLOCK.search(raw):
+            raw = _inject_once(raw, '<link rel="stylesheet" href="styles.css">', "</head>")
+            sandbox.write_file(ws, rel, raw)
+        if "script.js" in files and not SCRIPT_SRC.search(raw):
+            raw = _inject_once(raw, '<script src="script.js"></script>', "</body>")
+            sandbox.write_file(ws, rel, raw)
+    return added
+
+
 def extract_fences(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for lang, body in FENCE.findall(text or ""):
-        body = body.strip()
+        body = decode_written_text(body.strip())
         if not body:
             continue
         lang = (lang or "").strip()
@@ -33,10 +137,14 @@ def extract_fences(text: str) -> list[tuple[str, str]]:
             out.append(("main.py", body))
         elif low in {"html", "htm"}:
             out.append(("index.html", body))
-        elif low == "css":
+        elif low in {"css", "scss", "style"}:
             out.append(("styles.css", body))
+        elif low.endswith(".css"):
+            out.append((_safe_asset_name(lang, "styles.css"), body))
         elif low in {"js", "javascript"}:
             out.append(("script.js", body))
+        elif low.endswith(".js"):
+            out.append((_safe_asset_name(lang, "script.js"), body))
         elif low in {"csv", "tsv"}:
             out.append(("sheet.csv", body.replace("\t", ",") if low == "tsv" else body))
         elif low in {"mermaid", "mmd"}:
@@ -49,6 +157,8 @@ def extract_fences(text: str) -> list[tuple[str, str]]:
             out.append(("notes.md", body))
         elif _looks_like_html(body):
             out.append(("index.html", body))
+        elif _looks_like_css(body):
+            out.append(("styles.css", body))
         elif body.lstrip().startswith(("<mxfile", "flowchart", "graph ")):
             name = "diagram.drawio" if body.lstrip().startswith("<mxfile") else "diagram.mmd"
             out.append((name, body))
@@ -62,8 +172,30 @@ def _looks_like_html(text: str) -> bool:
     return blob.startswith(("<!doctype html", "<html", "<head", "<body", "<!doctype"))
 
 
-def maybe_html_source(text: str) -> str | None:
+def _looks_like_css(text: str) -> bool:
     blob = (text or "").strip()
+    if not blob or _looks_like_html(blob):
+        return False
+    if "def " in blob or "print(" in blob:
+        return False
+    return bool(
+        re.search(r"(^|\n)\s*(:root|html|body|\*|@media|[.#][\w-]+|[a-z][\w-]*(?:\s*,\s*[a-z][\w-]*)*)\s*\{", blob, re.I)
+        and blob.count("{") >= 2
+        and blob.count("}") >= 2
+    )
+
+
+def maybe_css_source(text: str) -> str | None:
+    blob = decode_written_text((text or "").strip())
+    if not blob or extract_fences(blob):
+        return None
+    if _looks_like_css(blob):
+        return blob
+    return None
+
+
+def maybe_html_source(text: str) -> str | None:
+    blob = decode_written_text((text or "").strip())
     if not blob:
         return None
     low = blob.lower()
