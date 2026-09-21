@@ -153,6 +153,7 @@ Write the finished answer only.
 Do not show thinking, plans, or tool JSON.
 Tools are optional. Prefer answering in the reply if a file is not required.
 A website or game needs index.html plus styles.css and script.js, all complete. Write those files. Do not JSON-escape them. Do not put a recap inside the files.
+Games: size the canvas, wire Start/Restart, and hide menus with the same CSS class you use to show them so overlays cannot trap clicks.
 Use fetch_url only for a normal page the user asked you to open.
 """
 

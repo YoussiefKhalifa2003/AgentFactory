@@ -386,7 +386,7 @@ function FilePreview({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(28,24,20,0.45)] p-3 sm:p-5"
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-[rgba(28,24,20,0.45)] p-3 sm:p-5"
       onClick={onClose}
     >
       <div
@@ -416,13 +416,20 @@ function FilePreview({
             </button>
           </div>
         </div>
-        <div className="min-h-0 flex-1 bg-black">
+        <div
+          className="relative min-h-0 flex-1 bg-black"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            frameRef.current?.focus();
+          }}
+        >
           {html ? (
             <iframe
               ref={frameRef}
               title={file.name}
               src={pageUrl}
-              className="h-[min(82vh,920px)] w-full border-0 bg-black"
+              className="block h-[min(82vh,920px)] min-h-[480px] w-full border-0 bg-black"
+              style={{ pointerEvents: "auto" }}
               allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write"
               allowFullScreen
               tabIndex={0}

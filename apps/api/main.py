@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -352,7 +352,7 @@ SITE_MIME = {
 
 
 @app.get("/api/jobs/{job_id}/site/{path:path}")
-async def job_site(job_id: str, path: str):
+async def job_site(job_id: str, path: str, request: Request):
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(404, "job not found")
@@ -371,7 +371,9 @@ async def job_site(job_id: str, path: str):
         "X-Content-Type-Options": "nosniff",
     }
     if suffix in {".html", ".htm"}:
-        html = local.assemble_page(ws, full.read_text(encoding="utf-8", errors="replace"))
+        raw = full.read_text(encoding="utf-8", errors="replace")
+        base = str(request.base_url).rstrip("/") + f"/api/jobs/{job_id}/site/"
+        html = local.playable_page(ws, raw, base=base)
         return HTMLResponse(html, media_type="text/html; charset=utf-8", headers=headers)
     return FileResponse(
         full,

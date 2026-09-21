@@ -72,6 +72,10 @@ def tidy_site_file(rel: str, content: str) -> str:
     low = (rel or "").replace("\\", "/").lower()
     if low.endswith((".js", ".css", ".html", ".htm")):
         body = strip_model_tail(body)
+    if low.endswith(".css") and ".hidden" not in body:
+        body = body.rstrip() + PLAY_CSS
+    if low.endswith((".html", ".htm")):
+        body = re.sub(r"<canvas\b[^>]*>", _ensure_canvas_size, body, count=1, flags=re.I)
     return body
 
 
@@ -179,6 +183,130 @@ def site_gap(ws: Path) -> str | None:
         if tidy != body:
             sandbox.write_file(ws, name, tidy)
     return None
+
+
+PLAY_CSS = """
+.hidden,
+.screen.hidden,
+.overlay.hidden,
+.screen.active.hidden,
+#start-screen.hidden,
+#game-over-screen.hidden,
+#pause-screen.hidden {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+.screen:not(.active) {
+  pointer-events: none !important;
+}
+#ui-layer button,
+#start-btn, #restart-btn, #resume-btn,
+.screen.active, .overlay:not(.hidden) {
+  pointer-events: auto !important;
+  cursor: pointer !important;
+}
+canvas { touch-action: none; }
+"""
+
+PLAY_JS = r"""
+(function () {
+  function fitCanvas() {
+    var c = document.getElementById("gameCanvas") || document.querySelector("canvas");
+    if (!c) return;
+    var box = (c.parentElement || document.body).getBoundingClientRect();
+    var w = Math.max(640, Math.floor(box.width) || 800);
+    var h = Math.max(480, Math.floor(box.height) || 600);
+    if (!c.getAttribute("width") || c.width < 100) c.width = w;
+    if (!c.getAttribute("height") || c.height < 100) c.height = h;
+  }
+  function hideMenus() {
+    document.querySelectorAll(".screen, .overlay, #start-screen, #game-over-screen, #pause-screen").forEach(function (el) {
+      el.classList.remove("active");
+      el.classList.add("hidden");
+    });
+  }
+  function showEl(el) {
+    if (!el) return;
+    el.classList.remove("hidden");
+    el.classList.add("active");
+  }
+  function wrap(name, before, after) {
+    var fn = window[name];
+    if (typeof fn !== "function" || fn.__deskWrapped) return;
+    var wrapped = function () {
+      if (before) before.apply(this, arguments);
+      var result = fn.apply(this, arguments);
+      if (after) after.apply(this, arguments);
+      return result;
+    };
+    wrapped.__deskWrapped = true;
+    window[name] = wrapped;
+  }
+  function boot() {
+    fitCanvas();
+    wrap("startGame", hideMenus);
+    wrap("endGame", null, function () {
+      showEl(document.getElementById("game-over-screen"));
+    });
+    ["start-btn", "restart-btn"].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (!b || b.getAttribute("data-desk-bound")) return;
+      b.setAttribute("data-desk-bound", "1");
+      b.addEventListener("click", function (e) {
+        hideMenus();
+        if (typeof window.startGame === "function") {
+          window.startGame();
+          e.stopImmediatePropagation();
+        }
+      }, true);
+    });
+    var resume = document.getElementById("resume-btn");
+    if (resume && !resume.getAttribute("data-desk-bound")) {
+      resume.setAttribute("data-desk-bound", "1");
+      resume.addEventListener("click", function () {
+        var p = document.getElementById("pause-screen");
+        if (p) {
+          p.classList.remove("active");
+          p.classList.add("hidden");
+        }
+      }, true);
+    }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+  window.addEventListener("resize", fitCanvas);
+})();
+"""
+
+
+def _ensure_canvas_size(match: re.Match[str]) -> str:
+    tag = match.group(0)
+    if re.search(r"\bwidth\s*=", tag, re.I):
+        return tag
+    return re.sub(r"\s*/?>$", ' width="800" height="600">', tag, count=1)
+
+
+def playable_page(ws: Path, html: str, base: str = "") -> str:
+    """Make View a real playable document: load local files and fix overlay/click traps."""
+    blob = decode_written_text(html or "")
+    blob = re.sub(r"<canvas\b[^>]*>", _ensure_canvas_size, blob, count=1, flags=re.I)
+    extras = ""
+    if base:
+        href = base if base.endswith("/") else base + "/"
+        extras += f'<base href="{href}">\n'
+    extras += f"<style id=\"desk-play\">{PLAY_CSS}</style>\n"
+    if re.search(r"<head[^>]*>", blob, re.I):
+        blob = re.sub(r"<head[^>]*>", lambda m: m.group(0) + "\n" + extras, blob, count=1, flags=re.I)
+    else:
+        blob = extras + blob
+    boot = f"<script id=\"desk-play-js\">{PLAY_JS}</script>\n"
+    if re.search(r"</body>", blob, re.I):
+        blob = re.sub(r"</body>", boot + "</body>", blob, count=1, flags=re.I)
+    else:
+        blob += boot
+    return blob
 
 
 def assemble_page(ws: Path, html: str) -> str:
