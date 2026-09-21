@@ -1,0 +1,175 @@
+"""Stored to-do lists, meeting sync, and assignment onto agent desks."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import db
+import meetings
+
+
+def pick_best_agent(suggested: str) -> dict[str, Any] | None:
+    agents = db.list_agents()
+    if not agents:
+        return None
+    for agent in agents:
+        if suggested in (agent.get("strengths") or []):
+            return agent
+    return agents[0]
+
+
+def item_prompt(list_title: str, text: str) -> str:
+    return (
+        f'Complete this task from the list "{list_title}".\n'
+        f"Task: {text}\n\n"
+        "Produce the finished deliverable in your reply."
+    )
+
+
+def sync_meetings() -> None:
+    info = meetings.status()
+    if not info.get("found"):
+        return
+    data = meetings.list_meetings(24)
+    for meeting in data.get("meetings") or []:
+        list_id = f"mtg-{meeting['id']}"
+        existing = db.get_list(list_id)
+        if not existing:
+            db.create_list(
+                {
+                    "id": list_id,
+                    "title": meeting["title"],
+                    "kind": "meeting",
+                    "source": str(meeting["id"]),
+                    "sort_at": meeting.get("date") or db.utcnow(),
+                }
+            )
+        else:
+            db.update_list(
+                list_id,
+                title=meeting["title"],
+                sort_at=meeting.get("date") or existing.get("sort_at"),
+            )
+        payload = meetings.list_actions(mine=False, meeting_id=meeting["id"], limit=80)
+        by_source = {item.get("source"): item for item in db.list_items(list_id)}
+        for action in payload.get("actions") or []:
+            existing = by_source.get(action["id"])
+            if existing:
+                if existing.get("status") == "open":
+                    db.update_item(
+                        existing["id"],
+                        suggested=action["suggested"],
+                        prompt=action["prompt"],
+                        text=action["text"],
+                    )
+                continue
+            db.create_item(
+                {
+                    "list_id": list_id,
+                    "text": action["text"],
+                    "prompt": action["prompt"],
+                    "suggested": action["suggested"],
+                    "source": action["id"],
+                    "mine": action.get("mine", True),
+                }
+            )
+
+
+def snapshot() -> dict[str, Any]:
+    sync_meetings()
+    return {
+        "lists": db.list_lists(),
+        "meetings": meetings.status(),
+    }
+
+
+def get_list_payload(list_id: str) -> dict[str, Any] | None:
+    sync_meetings()
+    row = db.get_list(list_id)
+    if not row:
+        return None
+    items = db.list_items(list_id)
+    row.update(db._list_counts(list_id))
+    return {**row, "items": items}
+
+
+def add_item(list_id: str, text: str) -> dict[str, Any]:
+    lst = db.get_list(list_id)
+    if not lst:
+        raise KeyError("list not found")
+    body = text.strip()
+    if not body:
+        raise ValueError("text required")
+    suggested = meetings._suggest_strength(body)
+    return db.create_item(
+        {
+            "list_id": list_id,
+            "text": body,
+            "prompt": item_prompt(lst["title"], body),
+            "suggested": suggested,
+            "mine": True,
+        }
+    )
+
+
+def start_next(agent_id: str) -> dict[str, Any] | None:
+    if db.agent_busy(agent_id):
+        return None
+    item = db.next_queued_item(agent_id)
+    if not item:
+        return None
+    agent = db.get_agent(agent_id)
+    if not agent:
+        return None
+    job = db.create_job(agent_id, item["prompt"], task_id=item["id"])
+    updated = db.update_item(
+        item["id"], status="working", job_id=job["id"], agent_id=agent_id
+    )
+    return {"item": updated, "job": job, "agent": agent, "queued": False}
+
+
+def assign(
+    *,
+    item_id: str | None = None,
+    list_id: str | None = None,
+    text: str | None = None,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    item = db.get_item(item_id) if item_id else None
+    if item is None and text:
+        target_list = list_id or "inbox"
+        if not db.get_list(target_list):
+            db.seed_inbox()
+            target_list = "inbox"
+        item = add_item(target_list, text)
+    if not item:
+        raise KeyError("item not found")
+
+    if item["status"] in {"assigned", "working"} and item.get("job_id"):
+        job = db.get_job(item["job_id"])
+        if job and job["status"] in {"queued", "thinking", "tool"}:
+            agent = db.get_agent(job["agent_id"])
+            return {"item": item, "job": job, "agent": agent, "queued": False}
+
+    suggested = item.get("suggested") or "coding"
+    agent = db.get_agent(agent_id) if agent_id else pick_best_agent(suggested)
+    if not agent:
+        raise LookupError("no agent")
+
+    if db.agent_busy(agent["id"]):
+        updated = db.update_item(
+            item["id"],
+            status="assigned",
+            agent_id=agent["id"],
+            job_id=None,
+        )
+        return {"item": updated, "job": None, "agent": agent, "queued": True}
+
+    job = db.create_job(agent["id"], item["prompt"], task_id=item["id"])
+    updated = db.update_item(
+        item["id"],
+        status="working",
+        agent_id=agent["id"],
+        job_id=job["id"],
+    )
+    return {"item": updated, "job": job, "agent": agent, "queued": False}
