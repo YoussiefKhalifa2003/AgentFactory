@@ -20,6 +20,8 @@ export function ListsSidebar({
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [meetingsFound, setMeetingsFound] = useState<boolean | null>(null);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [removing, setRemoving] = useState(false);
 
   const openList = lists.find((l) => l.id === openId) || null;
   const isMeeting = openList?.kind === "meeting";
@@ -59,6 +61,10 @@ export function ListsSidebar({
   }, [taskTick]);
 
   useEffect(() => {
+    setPicked([]);
+  }, [openId]);
+
+  useEffect(() => {
     loadItems(openId);
   }, [openId, taskTick]);
 
@@ -66,6 +72,34 @@ export function ListsSidebar({
     if (isMeeting && mine) return items.filter((item) => item.mine);
     return items;
   }, [items, isMeeting, mine]);
+
+  const visibleIds = useMemo(() => visible.map((item) => item.id), [visible]);
+  const allPicked = visibleIds.length > 0 && visibleIds.every((id) => picked.includes(id));
+  const picking = picked.length > 0;
+
+  function togglePick(id: string) {
+    setPicked((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  }
+
+  function toggleAllVisible() {
+    setPicked(allPicked ? [] : visibleIds);
+  }
+
+  async function removePicked() {
+    const ids = picked.filter((id) => visibleIds.includes(id));
+    if (!ids.length || removing) return;
+    setRemoving(true);
+    try {
+      await Promise.all(
+        ids.map((id) => fetch(`${API_URL}/api/items/${id}`, { method: "DELETE" }))
+      );
+      setPicked([]);
+      await loadItems(openId);
+      await loadLists();
+    } finally {
+      setRemoving(false);
+    }
+  }
 
   const yours = lists.filter((l) => l.kind !== "meeting");
   const meetings = lists.filter((l) => l.kind === "meeting");
@@ -173,26 +207,46 @@ export function ListsSidebar({
 
       <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--line)]">
         <div className="flex shrink-0 items-center justify-between gap-2 px-5 py-3">
-          <h2 className="min-w-0 truncate text-sm font-semibold tracking-tight">
-            {openList?.title || "Tasks"}
-          </h2>
-          {isMeeting && (
-            <div className="flex rounded-full bg-[var(--paper-deep)] p-0.5 text-xs">
-              <button
-                type="button"
-                className={`rounded-full px-2.5 py-1 ${mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
-                onClick={() => setMine(true)}
-              >
-                Mine
-              </button>
-              <button
-                type="button"
-                className={`rounded-full px-2.5 py-1 ${!mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
-                onClick={() => setMine(false)}
-              >
-                All
-              </button>
-            </div>
+          <div className="flex min-w-0 items-center gap-2">
+            {visible.length > 0 && (
+              <SelectCircle
+                checked={allPicked}
+                label={allPicked ? "Clear selection" : "Select all tasks"}
+                onToggle={toggleAllVisible}
+              />
+            )}
+            <h2 className="min-w-0 truncate text-sm font-semibold tracking-tight">
+              {picking ? `${picked.length} selected` : openList?.title || "Tasks"}
+            </h2>
+          </div>
+          {picking ? (
+            <button
+              type="button"
+              className="btn shrink-0 px-3 py-1 text-xs"
+              disabled={removing}
+              onClick={removePicked}
+            >
+              Delete
+            </button>
+          ) : (
+            isMeeting && (
+              <div className="flex rounded-full bg-[var(--paper-deep)] p-0.5 text-xs">
+                <button
+                  type="button"
+                  className={`rounded-full px-2.5 py-1 ${mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
+                  onClick={() => setMine(true)}
+                >
+                  Mine
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-full px-2.5 py-1 ${!mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
+                  onClick={() => setMine(false)}
+                >
+                  All
+                </button>
+              </div>
+            )
           )}
         </div>
         <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
@@ -204,10 +258,11 @@ export function ListsSidebar({
           {visible.map((item) => {
             const best = pickBestAgent(agents, item.suggested);
             const assigned = agents.find((a) => a.id === item.agent_id);
+            const chosen = picked.includes(item.id);
             return (
               <article
                 key={item.id}
-                draggable
+                draggable={!picking}
                 onDragStart={(e) => {
                   (e.currentTarget as HTMLElement).dataset.dragged = "1";
                   e.dataTransfer.setData(TASK_MIME, taskDragPayload(item));
@@ -222,15 +277,26 @@ export function ListsSidebar({
                     delete el.dataset.dragged;
                     return;
                   }
+                  if (picking) {
+                    togglePick(item.id);
+                    return;
+                  }
                   onItemClick(item);
                 }}
-                className="mb-2 cursor-grab rounded-2xl px-3 py-3 hover:bg-white active:cursor-grabbing"
+                className={`mb-2 rounded-2xl px-3 py-3 hover:bg-white ${
+                  picking ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"
+                } ${chosen ? "bg-white" : ""}`}
               >
                 <div className="flex items-start gap-2">
+                  <SelectCircle
+                    checked={chosen}
+                    label={chosen ? `Deselect ${item.text}` : `Select ${item.text}`}
+                    onToggle={() => togglePick(item.id)}
+                  />
                   <StatusMark status={item.status} />
                   <p className="line-clamp-2 flex-1 text-sm leading-5">{item.text}</p>
                 </div>
-                <div className="mt-2 flex items-center justify-between gap-2 pl-6">
+                <div className="mt-2 flex items-center justify-between gap-2 pl-11">
                   <span className="text-[11px] text-[var(--ink-soft)]">
                     {item.status === "open"
                       ? strengthLabel(item.suggested)
@@ -300,6 +366,37 @@ function ListRow({
         </button>
       )}
     </div>
+  );
+}
+
+function SelectCircle({
+  checked,
+  onToggle,
+  label,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={checked}
+      draggable={false}
+      onMouseDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onToggle();
+      }}
+      className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[rgba(28,24,20,0.28)] bg-white"
+    >
+      {checked ? <span className="block h-2 w-2 rounded-full bg-[var(--ink)]" /> : null}
+    </button>
   );
 }
 
