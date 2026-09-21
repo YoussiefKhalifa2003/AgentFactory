@@ -153,7 +153,7 @@ Write the finished answer only.
 Do not show thinking, plans, or tool JSON.
 Tools are optional. Prefer answering in the reply if a file is not required.
 A website or game needs index.html plus styles.css and script.js, all complete. Write those files. Do not JSON-escape them. Do not put a recap inside the files.
-Games: size the canvas, wire Start/Restart, and hide menus with the same CSS class you use to show them so overlays cannot trap clicks.
+Games must be playable when the user clicks View. Finish script.js. Wire every Start/Restart button by id. Hide menus with the same CSS class you use to show them. Prefer a complete 2D canvas game over a huge 3D engine that gets cut off. Do not rely on pointer lock. If a file is truncated, write it again in full.
 Use fetch_url only for a normal page the user asked you to open.
 """
 
@@ -863,6 +863,7 @@ async def _finish(
     if not job:
         return
     local.materialize_site(ws, output)
+    local.heal_site(ws)
     _collect_artifacts(job, agent, ws, broadcast)
     ok, note = _verify(agent, ws, prompt, output)
     if not ok:

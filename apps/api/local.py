@@ -126,11 +126,75 @@ def _code_balanced(text: str) -> bool:
 
 def js_looks_complete(text: str) -> bool:
     blob = strip_model_tail(text or "").strip()
-    if len(blob) < 20:
+    if len(blob) < 80:
         return False
     if re.search(r"</html>|</style>|^#{1,3} ", blob, re.M | re.I):
         return False
-    return _code_balanced(blob)
+    if re.search(r"<\s*script\b", blob, re.I):
+        return False
+    if not _code_balanced(blob):
+        return False
+    if re.search(r"[:,=+\-*/(\[{]\s*$", blob):
+        return False
+    last = blob.rstrip()[-1]
+    if last not in "});":
+        return False
+    return True
+
+
+def _looks_like_game(html: str) -> bool:
+    return bool(re.search(r"<canvas\b|gameCanvas|requestAnimationFrame", html or "", re.I))
+
+
+def _js_hooks_ui(js: str, html: str) -> bool:
+    if not _looks_like_game(html):
+        return True
+    if not re.search(r"addEventListener|onclick\s*=|requestAnimationFrame", js or "", re.I):
+        return False
+    if re.search(r"id=['\"](?:btn-start|start-btn|play-btn)['\"]", html or "", re.I):
+        if not re.search(r"btn-start|start-btn|play-btn|startGame", js or ""):
+            return False
+    return True
+
+
+def _site_js_playable(ws: Path, html: str) -> bool:
+    files = set(sandbox.list_files(ws))
+    linked = [_safe_asset_name(name, "") for name in SCRIPT_SRC.findall(html or "")]
+    linked = [name for name in linked if name]
+    names = linked or [name for name in files if name.endswith(".js")]
+    if not names:
+        return False
+    for name in names:
+        if name not in files:
+            return False
+        body = sandbox.read_file(ws, name)
+        if not js_looks_complete(body) or not _js_hooks_ui(body, html):
+            return False
+    return True
+
+
+def fallback_game_js() -> str:
+    path = Path(__file__).with_name("play_fallback.js")
+    return path.read_text(encoding="utf-8")
+
+
+def heal_site(ws: Path) -> None:
+    """If a game page is missing or cut-off JS, drop in a complete playable script."""
+    files = set(sandbox.list_files(ws))
+    htmls = [name for name in files if name.endswith((".html", ".htm"))]
+    if not htmls:
+        return
+    html = sandbox.read_file(ws, htmls[0])
+    if not _looks_like_game(html) and not SCRIPT_SRC.search(html or ""):
+        return
+    if _site_js_playable(ws, html):
+        return
+    sandbox.write_file(ws, "script.js", fallback_game_js())
+    if not SCRIPT_SRC.search(html or ""):
+        patched = re.sub(r"</body>", '<script src="script.js"></script>\n</body>', html, count=1, flags=re.I)
+        if patched == html:
+            patched = html.rstrip() + '\n<script src="script.js"></script>\n'
+        sandbox.write_file(ws, htmls[0], patched)
 
 
 def site_gap(ws: Path) -> str | None:
@@ -140,28 +204,26 @@ def site_gap(ws: Path) -> str | None:
     if not htmls:
         return None
     html = sandbox.read_file(ws, htmls[0])
-    interactive = bool(
-        re.search(
-            r"<canvas\b|requestAnimationFrame|addEventListener|onclick=|keydown|game",
-            html,
-            re.I,
-        )
+    interactive = _looks_like_game(html) or bool(
+        re.search(r"addEventListener|onclick=|keydown|game", html, re.I)
     )
     js_files = [f for f in files if f.endswith(".js")]
     has_inline = bool(SCRIPT_BLOCK.search(html))
-    linked = [ _safe_asset_name(m, "") for m in SCRIPT_SRC.findall(html) ]
+    linked = [_safe_asset_name(m, "") for m in SCRIPT_SRC.findall(html)]
     linked = [n for n in linked if n]
     if interactive or linked:
         missing = [n for n in linked if n not in files]
         if missing:
             return (
                 f"{missing[0]} is linked from the page but missing. "
-                "write_file the COMPLETE file now. Raw source only, no markdown."
+                "write_file the COMPLETE file now. Keep the game small enough to finish: "
+                "2D canvas, wired Start button, .hidden menus. Raw source only, no markdown."
             )
         if not js_files and not has_inline:
             return (
                 "This page needs script.js to be interactive. "
-                "write_file the COMPLETE script.js now. Raw source only, no markdown."
+                "write_file a COMPLETE working script.js now. Wire every button id from the HTML. "
+                "Raw JavaScript only. No markdown."
             )
         for name in js_files or linked:
             if name not in files:
@@ -171,10 +233,11 @@ def site_gap(ws: Path) -> str | None:
             if tidy != body:
                 sandbox.write_file(ws, name, tidy)
                 body = tidy
-            if not js_looks_complete(body):
+            if not js_looks_complete(body) or not _js_hooks_ui(body, html):
                 return (
-                    f"{name} was cut off. write_file the complete file from the first line "
-                    "to the last closing brace. Raw JavaScript only. No markdown."
+                    f"{name} is incomplete or does not wire the Start button. "
+                    "write_file the complete file from the first line to the last closing brace. "
+                    "Keep it a finished 2D game, not a huge engine. Raw JavaScript only."
                 )
     css_files = [f for f in files if f.endswith(".css")]
     for name in css_files:
@@ -189,25 +252,35 @@ PLAY_CSS = """
 .hidden,
 .screen.hidden,
 .overlay.hidden,
+.menu.hidden,
 .screen.active.hidden,
+.menu.active.hidden,
 #start-screen.hidden,
 #game-over-screen.hidden,
-#pause-screen.hidden {
+#pause-screen.hidden,
+#menu-start.hidden,
+#menu-pause.hidden,
+#menu-gameover.hidden {
   display: none !important;
   visibility: hidden !important;
   opacity: 0 !important;
   pointer-events: none !important;
 }
-.screen:not(.active) {
+.screen:not(.active),
+.menu:not(.active):not(.hidden) {
+  pointer-events: none;
+}
+#ui-layer, #hud, .hud-section {
   pointer-events: none !important;
 }
 #ui-layer button,
-#start-btn, #restart-btn, #resume-btn,
-.screen.active, .overlay:not(.hidden) {
+.menu, .menu.active, .overlay:not(.hidden), .screen.active,
+.action-btn, #start-btn, #restart-btn, #resume-btn,
+#btn-start, #btn-retry, #btn-resume, #btn-restart {
   pointer-events: auto !important;
   cursor: pointer !important;
 }
-canvas { touch-action: none; }
+canvas { touch-action: none; cursor: crosshair !important; }
 """
 
 PLAY_JS = r"""
@@ -222,7 +295,9 @@ PLAY_JS = r"""
     if (!c.getAttribute("height") || c.height < 100) c.height = h;
   }
   function hideMenus() {
-    document.querySelectorAll(".screen, .overlay, #start-screen, #game-over-screen, #pause-screen").forEach(function (el) {
+    document.querySelectorAll(
+      ".screen, .overlay, .menu, #start-screen, #game-over-screen, #pause-screen, #menu-start, #menu-pause, #menu-gameover"
+    ).forEach(function (el) {
       el.classList.remove("active");
       el.classList.add("hidden");
     });
@@ -231,6 +306,9 @@ PLAY_JS = r"""
     if (!el) return;
     el.classList.remove("hidden");
     el.classList.add("active");
+  }
+  function startFn() {
+    return window.startGame || window.init || window.beginGame || window.start;
   }
   function wrap(name, before, after) {
     var fn = window[name];
@@ -244,35 +322,48 @@ PLAY_JS = r"""
     wrapped.__deskWrapped = true;
     window[name] = wrapped;
   }
+  function bindStart(node) {
+    if (!node || node.getAttribute("data-desk-bound")) return;
+    node.setAttribute("data-desk-bound", "1");
+    node.addEventListener("click", function (e) {
+      hideMenus();
+      var fn = startFn();
+      if (typeof fn === "function") {
+        fn();
+        e.stopImmediatePropagation();
+      }
+    }, true);
+  }
   function boot() {
     fitCanvas();
     wrap("startGame", hideMenus);
+    wrap("init", hideMenus);
     wrap("endGame", null, function () {
-      showEl(document.getElementById("game-over-screen"));
+      showEl(document.getElementById("game-over-screen") || document.getElementById("menu-gameover"));
     });
-    ["start-btn", "restart-btn"].forEach(function (id) {
+    [
+      "start-btn", "restart-btn", "btn-start", "btn-retry", "btn-restart", "play-btn"
+    ].forEach(function (id) {
+      bindStart(document.getElementById(id));
+    });
+    document.querySelectorAll(".action-btn, .menu button, .overlay button, .screen button").forEach(function (btn) {
+      var blob = ((btn.id || "") + " " + (btn.textContent || "")).toLowerCase();
+      if (/resume/.test(blob)) return;
+      if (/start|retry|initialize|play|reboot/.test(blob)) bindStart(btn);
+    });
+    ["resume-btn", "btn-resume"].forEach(function (id) {
       var b = document.getElementById(id);
       if (!b || b.getAttribute("data-desk-bound")) return;
       b.setAttribute("data-desk-bound", "1");
-      b.addEventListener("click", function (e) {
-        hideMenus();
-        if (typeof window.startGame === "function") {
-          window.startGame();
-          e.stopImmediatePropagation();
-        }
-      }, true);
-    });
-    var resume = document.getElementById("resume-btn");
-    if (resume && !resume.getAttribute("data-desk-bound")) {
-      resume.setAttribute("data-desk-bound", "1");
-      resume.addEventListener("click", function () {
-        var p = document.getElementById("pause-screen");
+      b.addEventListener("click", function () {
+        var p = document.getElementById("pause-screen") || document.getElementById("menu-pause");
         if (p) {
           p.classList.remove("active");
           p.classList.add("hidden");
         }
+        if (typeof window.togglePause === "function") window.togglePause();
       }, true);
-    }
+    });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
@@ -290,8 +381,16 @@ def _ensure_canvas_size(match: re.Match[str]) -> str:
 
 def playable_page(ws: Path, html: str, base: str = "") -> str:
     """Make View a real playable document: load local files and fix overlay/click traps."""
+    heal_site(ws)
     blob = decode_written_text(html or "")
     blob = re.sub(r"<canvas\b[^>]*>", _ensure_canvas_size, blob, count=1, flags=re.I)
+    if not _site_js_playable(ws, blob):
+        blob = re.sub(r"<script\b[^>]*\bsrc\b[^>]*>\s*</script>", "", blob, flags=re.I)
+        game = f"<script id=\"desk-game\">{fallback_game_js()}</script>\n"
+        if re.search(r"</body>", blob, re.I):
+            blob = re.sub(r"</body>", game + "</body>", blob, count=1, flags=re.I)
+        else:
+            blob += game
     extras = ""
     if base:
         href = base if base.endswith("/") else base + "/"
