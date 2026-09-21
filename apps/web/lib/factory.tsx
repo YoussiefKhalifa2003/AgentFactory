@@ -124,6 +124,29 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    const tokenBuf: Record<string, { text: string; think: string }> = {};
+    let raf = 0;
+
+    const flushTokens = () => {
+      raf = 0;
+      const ids = Object.keys(tokenBuf);
+      if (!ids.length) return;
+      const snapshot = { ...tokenBuf };
+      for (const id of ids) delete tokenBuf[id];
+      setLive((prev) => {
+        const next = { ...prev };
+        for (const id of ids) {
+          const add = snapshot[id];
+          const cur = next[id] || emptyLive();
+          next[id] = {
+            ...cur,
+            tokens: (cur.tokens || "") + add.text,
+            think: (cur.think || "") + add.think,
+          };
+        }
+        return next;
+      });
+    };
 
     const connect = () => {
       if (closed) return;
@@ -171,6 +194,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
           }));
         }
         if (msg.type === "job.done" || msg.type === "job.blocked") {
+          if (raf) {
+            cancelAnimationFrame(raf);
+            raf = 0;
+          }
+          if (msg.agentId) delete tokenBuf[msg.agentId];
           setJobs((prev) =>
             prev.map((j) =>
               j.id === msg.jobId
@@ -199,7 +227,13 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
             )
           );
         }
-        if (msg.jobId && msg.agentId) {
+        if (msg.type === "job.token" && msg.agentId) {
+          const slot = (tokenBuf[msg.agentId] ||= { text: "", think: "" });
+          if (msg.channel === "think") slot.think += msg.delta || "";
+          else slot.text += msg.delta || "";
+          if (!raf) raf = requestAnimationFrame(flushTokens);
+        }
+        if (msg.jobId && msg.agentId && msg.type !== "job.token") {
           setLive((prev) => {
             const cur = prev[msg.agentId] || emptyLive();
             const job = {
@@ -228,13 +262,10 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
             };
             let tokens = cur.tokens;
             let think = cur.think || "";
-            if (msg.type === "job.token") {
-              if (msg.channel === "think") think += msg.delta || "";
-              else tokens += msg.delta || "";
-            }
             if (msg.type === "job.started") {
               tokens = "";
               think = "";
+              delete tokenBuf[msg.agentId];
             }
             if (msg.type === "job.done") {
               tokens = msg.output || tokens;
@@ -256,6 +287,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
     return () => {
       closed = true;
       if (timer) clearTimeout(timer);
+      if (raf) cancelAnimationFrame(raf);
       wsRef.current?.close();
     };
   }, []);

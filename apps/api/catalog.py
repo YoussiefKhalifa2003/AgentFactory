@@ -282,6 +282,92 @@ def _only_new(previous: str, incoming: str) -> tuple[str, str]:
     return incoming, previous + incoming
 
 
+def _json_string_after_key(buf: str, key: str) -> str:
+    """Read a JSON string value that may still be incomplete (streaming tool args)."""
+    m = re.search(rf'"{re.escape(key)}"\s*:\s*"', buf)
+    if not m:
+        return ""
+    s = buf[m.end() :]
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == '"':
+            break
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= len(s):
+            break
+        nxt = s[i + 1]
+        mapping = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "/": "/", "\\": "\\"}
+        if nxt in mapping:
+            out.append(mapping[nxt])
+            i += 2
+            continue
+        if nxt == "u" and i + 5 < len(s):
+            try:
+                out.append(chr(int(s[i + 2 : i + 6], 16)))
+                i += 6
+                continue
+            except ValueError:
+                break
+        break
+    return "".join(out)
+
+
+def _write_file_body(args: Any) -> str:
+    if isinstance(args, dict):
+        return str(args.get("content") or "")
+    text = str(args or "")
+    if not text:
+        return ""
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return str(data.get("content") or "")
+    except json.JSONDecodeError:
+        pass
+    return _json_string_after_key(text, "content")
+
+
+class _WriteFileStream:
+    """Live-type the file body while write_file arguments are still streaming in."""
+
+    def __init__(self, on_token: TokenCb | None) -> None:
+        self.on_token = on_token
+        self.names: dict[int, str] = {}
+        self.args: dict[int, str] = {}
+        self.seen: dict[int, int] = {}
+
+    def feed(self, deltas: list[Any]) -> None:
+        if not self.on_token:
+            return
+        for item in deltas:
+            if not isinstance(item, dict):
+                continue
+            idx = int(item.get("index") or 0)
+            fn = item.get("function") or {}
+            if fn.get("name"):
+                self.names[idx] = str(fn["name"])
+            raw = fn.get("arguments")
+            if raw in (None, ""):
+                continue
+            if isinstance(raw, dict):
+                self.args[idx] = json.dumps(raw, ensure_ascii=False)
+            else:
+                self.args[idx] = self.args.get(idx, "") + str(raw)
+            name = self.names.get(idx, "")
+            if name and name != "write_file":
+                continue
+            body = _write_file_body(self.args[idx])
+            prev = self.seen.get(idx, 0)
+            if len(body) > prev:
+                self.on_token(body[prev:])
+                self.seen[idx] = len(body)
+
+
 def collapse_repeats(text: str) -> str:
     if not text:
         return ""
@@ -514,9 +600,13 @@ async def openai_chat_stream(
             )
             sink = _StreamGate(on_token, on_think)
             tool_acc: dict[int, dict[str, Any]] = {}
+            files = _WriteFileStream(on_token)
             try:
                 async with client.stream(
-                    "POST", f"{url}/chat/completions", headers=headers, json=body
+                    "POST",
+                    f"{url}/chat/completions",
+                    headers={**headers, "Accept": "text/event-stream"},
+                    json=body,
                 ) as r:
                     if r.status_code >= 400:
                         err_body = (await r.aread()).decode("utf-8", "replace")
@@ -548,6 +638,8 @@ async def openai_chat_stream(
                             sink.push_content(piece)
                         if delta.get("tool_calls"):
                             _merge_tool_delta(tool_acc, delta["tool_calls"])
+                            files.feed(delta["tool_calls"])
+                        await asyncio.sleep(0)
             except httpx.TimeoutException:
                 last = zen.ZenError(504, f"{model} timed out")
                 continue
@@ -639,6 +731,7 @@ async def ollama_chat_stream(
             body = payload if use_tools else {k: v for k, v in payload.items() if k != "tools"}
             sink = _StreamGate(on_token, on_think)
             tool_acc: dict[int, dict[str, Any]] = {}
+            files = _WriteFileStream(on_token)
             try:
                 async with client.stream(
                     "POST", f"{OLLAMA_BASE}/api/chat", json=body
@@ -677,7 +770,10 @@ async def ollama_chat_stream(
                             sink.push_content(piece)
                         if msg.get("tool_calls"):
                             for i, call in enumerate(msg["tool_calls"]):
-                                _merge_tool_delta(tool_acc, [{**call, "index": i}])
+                                packed = {**call, "index": i}
+                                _merge_tool_delta(tool_acc, [packed])
+                                files.feed([packed])
+                        await asyncio.sleep(0)
             except httpx.TimeoutException:
                 last = zen.ZenError(504, f"{backend} timed out")
                 continue
@@ -735,11 +831,19 @@ async def chat(
             on_think=on_think,
             timeout=300,
         )
-    data = await zen.chat(messages, model=backend, tools=tools)
-    content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    if on_token and content:
-        on_token(str(content))
-    return data
+    return await openai_chat_stream(
+        zen.BASE,
+        zen.API_KEY,
+        backend,
+        messages,
+        tools=tools,
+        timeout=120,
+        extra_headers={
+            "Authorization": f"Bearer {zen.API_KEY}",
+        },
+        on_token=on_token,
+        on_think=on_think,
+    )
 
 
 async def complete_with_failover(

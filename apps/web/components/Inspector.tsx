@@ -23,15 +23,19 @@ function isNoise(job: Job) {
   return false;
 }
 
-function stripThink(text: string) {
-  return (text || "")
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .replace(/<think>[\s\S]*$/gi, "")
-    .trim();
+function stripThink(text: string, live = false) {
+  let out = text || "";
+  out = out.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  if (live) {
+    out = out.replace(/<\/?think>/gi, "");
+  } else {
+    out = out.replace(/<think>[\s\S]*$/gi, "");
+  }
+  return out.trim();
 }
 
-function friendlyText(text: string) {
-  const raw = stripThink(text).trim();
+function friendlyText(text: string, live = false) {
+  const raw = stripThink(text, live).trim();
   if (!raw) return "";
   if (/freetiererror|only be used from within opencode/i.test(raw)) {
     return "That OpenCode free model isn’t available here. Pick OpenRouter or a local model.";
@@ -80,9 +84,16 @@ function collapseRepeats(text: string) {
   return lines.join("\n").trim();
 }
 
-function jobReply(job: Job, liveTokens: string, liveJobId: string | undefined, working: boolean) {
-  const live = working && liveJobId && job.id === liveJobId ? liveTokens : "";
-  if (live) return collapseRepeats(friendlyText(live));
+function jobReply(
+  job: Job,
+  liveTokens: string,
+  liveThink: string,
+  liveJobId: string | undefined,
+  working: boolean
+) {
+  const live =
+    working && liveJobId && job.id === liveJobId ? liveTokens || liveThink : "";
+  if (live) return friendlyText(live, true);
   const text = collapseRepeats(friendlyText(job.output || job.error || ""));
   if (text) return text;
   if (job.status === "done") return "Done.";
@@ -648,7 +659,13 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         )}
         {thread.map((item) => {
           const active = item.id === liveJobId && working;
-          const reply = jobReply(item, state?.tokens || "", liveJobId, active);
+          const reply = jobReply(
+            item,
+            state?.tokens || "",
+            state?.think || "",
+            liveJobId,
+            active
+          );
           const files = filesForJob(item, state?.artifacts || [], liveJobId);
           const chartFile = files.find(isMermaidFile);
           const drawioFile = files.find(isDrawioFile);

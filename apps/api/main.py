@@ -67,17 +67,17 @@ hub = Hub()
 loop: asyncio.AbstractEventLoop | None = None
 
 
-def broadcast(payload: dict[str, Any]) -> None:
+def broadcast(payload: dict[str, Any]) -> asyncio.Task | None:
     if loop is None:
-        return
+        return None
     try:
         running = asyncio.get_running_loop()
     except RuntimeError:
         running = None
     if running is loop:
-        loop.create_task(hub.send(payload))
-        return
+        return loop.create_task(hub.send(payload))
     asyncio.run_coroutine_threadsafe(hub.send(payload), loop)
+    return None
 
 
 class AgentIn(BaseModel):

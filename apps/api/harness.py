@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -349,25 +350,70 @@ def _stream_text(
 ) -> None:
     if not content:
         return
-    if whole or "\n" in content:
-        broadcast(
-            {
-                "type": "job.token",
-                "jobId": job_id,
-                "agentId": agent_id,
-                "delta": content if content.endswith("\n") else content + "\n",
-            }
-        )
-        return
-    for word in content.split(" "):
-        broadcast(
-            {
-                "type": "job.token",
-                "jobId": job_id,
-                "agentId": agent_id,
-                "delta": word + " ",
-            }
-        )
+    broadcast(
+        {
+            "type": "job.token",
+            "jobId": job_id,
+            "agentId": agent_id,
+            "delta": content if content.endswith("\n") or whole else content + " ",
+        }
+    )
+
+
+class _TokenPump:
+    """Send tokens out the websocket one bite at a time so the desk can paint."""
+
+    def __init__(self, broadcast: Broadcast, job_id: str, agent_id: str) -> None:
+        self.broadcast = broadcast
+        self.job_id = job_id
+        self.agent_id = agent_id
+        self.q: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+        self.task = asyncio.create_task(self._run())
+        self.streamed = False
+
+    def push(self, delta: str, channel: str = "text") -> None:
+        if not delta:
+            return
+        self.streamed = True
+        self.q.put_nowait((channel, delta))
+
+    async def close(self) -> None:
+        await self.q.put(None)
+        try:
+            await self.task
+        except asyncio.CancelledError:
+            pass
+
+    async def _run(self) -> None:
+        while True:
+            item = await self.q.get()
+            if item is None:
+                return
+            channel, delta = item
+            step = 28
+            if len(delta) <= 64:
+                pieces = [delta]
+            else:
+                pieces = [delta[i : i + step] for i in range(0, len(delta), step)]
+            for piece in pieces:
+                fut = self.broadcast(
+                    {
+                        "type": "job.token",
+                        "jobId": self.job_id,
+                        "agentId": self.agent_id,
+                        "delta": piece,
+                        "channel": channel,
+                    }
+                )
+                if fut is not None:
+                    try:
+                        await fut
+                    except Exception:
+                        pass
+                if len(pieces) > 1:
+                    await asyncio.sleep(0.01)
+                else:
+                    await asyncio.sleep(0)
 
 
 def _workspace_recap(ws: Path) -> str:
@@ -408,15 +454,13 @@ async def _run_named_tool(
     result = await _call_tool(ws, name, args or {})
     if name == "write_file":
         path = str(args.get("path") or "file")
-        body = str(args.get("content") or "")
-        if not _is_junk_output(body):
-            _stream_text(
-                broadcast,
-                job["id"],
-                agent["id"],
-                f"\n# {path}\n{body[:2500]}\n",
-                whole=True,
-            )
+        _stream_text(
+            broadcast,
+            job["id"],
+            agent["id"],
+            f"Wrote {path}.\n",
+            whole=True,
+        )
     elif name == "run_python":
         try:
             payload = json.loads(result)
@@ -922,138 +966,139 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
         ]
         used_model = agent.get("model") or ""
         output_parts: list[str] = []
-        streamed = False
+        pump = _TokenPump(broadcast, job_id, agent["id"])
 
         def on_token(delta: str) -> None:
-            nonlocal streamed
-            if not delta:
-                return
-            streamed = True
-            broadcast(
-                {
-                    "type": "job.token",
-                    "jobId": job_id,
-                    "agentId": agent["id"],
-                    "delta": delta,
-                    "channel": "text",
-                }
-            )
+            pump.push(delta, "text")
 
         def on_think(delta: str) -> None:
-            if not delta:
-                return
-            broadcast(
-                {
-                    "type": "job.token",
-                    "jobId": job_id,
-                    "agentId": agent["id"],
-                    "delta": delta,
-                    "channel": "think",
-                }
-            )
+            pump.push(delta, "think")
 
-        allow_tools = _use_tools(agent, prompt)
-        for _round_i in range(3):
-            data, used_model = await _complete_with_failover(
-                messages,
-                [used_model],
-                broadcast,
-                job_id,
-                agent["id"],
-                on_token=on_token,
-                on_think=on_think,
-                with_tools=allow_tools,
-            )
-            choice = (data.get("choices") or [{}])[0]
-            msg = _message_from_choice(choice)
-            tool_calls = msg.get("tool_calls") or []
-            content = msg.get("content") or ""
-            import catalog as _catalog
+        try:
+            allow_tools = _use_tools(agent, prompt)
+            for _round_i in range(3):
+                data, used_model = await _complete_with_failover(
+                    messages,
+                    [used_model],
+                    broadcast,
+                    job_id,
+                    agent["id"],
+                    on_token=on_token,
+                    on_think=on_think,
+                    with_tools=allow_tools,
+                )
+                choice = (data.get("choices") or [{}])[0]
+                msg = _message_from_choice(choice)
+                tool_calls = msg.get("tool_calls") or []
+                content = msg.get("content") or ""
+                import catalog as _catalog
 
-            content = _catalog.strip_thinking(content)
-            if tool_calls:
-                messages.append(_assistant_tool_message(content, tool_calls))
-            else:
-                messages.append({"role": "assistant", "content": content})
+                content = _catalog.strip_thinking(content)
+                if tool_calls:
+                    messages.append(_assistant_tool_message(content, tool_calls))
+                else:
+                    messages.append({"role": "assistant", "content": content})
 
-            if tool_calls:
-                for call in tool_calls:
-                    fn = call.get("function") or {}
-                    name = fn.get("name") or ""
-                    raw_args = fn.get("arguments") or "{}"
-                    args = _parse_tool_args(raw_args)
-                    if name == "write_file" and not args.get("content"):
+                if tool_calls:
+                    for call in tool_calls:
+                        fn = call.get("function") or {}
+                        name = fn.get("name") or ""
+                        raw_args = fn.get("arguments") or "{}"
+                        args = _parse_tool_args(raw_args)
+                        if name == "write_file" and not args.get("content"):
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": call.get("id") or name,
+                                    "name": name,
+                                    "content": "error: file content was cut off. Put the finished text in your reply instead of calling tools.",
+                                }
+                            )
+                            continue
+                        result = await _run_named_tool(ws, name, args or {}, job, agent, broadcast)
                         messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": call.get("id") or name,
                                 "name": name,
-                                "content": "error: file content was cut off. Put the finished text in your reply instead of calling tools.",
+                                "content": result[:12_000],
                             }
                         )
-                        continue
-                    result = await _run_named_tool(ws, name, args or {}, job, agent, broadcast)
+                    local.materialize_site(ws, content)
+                    allow_tools = False
+                    continue
+
+                if _use_tools(agent, prompt):
+                    transcripts, leftover = await _apply_text_actions(
+                        content, ws, job, agent, broadcast
+                    )
+                else:
+                    leftover = await _save_desk_files(content, content, ws, job, agent, broadcast)
+                    transcripts = []
+                if transcripts:
                     messages.append(
                         {
-                            "role": "tool",
-                            "tool_call_id": call.get("id") or name,
-                            "name": name,
-                            "content": result[:12_000],
+                            "role": "user",
+                            "content": "Put the finished answer in your reply now. No tools.",
                         }
                     )
-                local.materialize_site(ws, content)
-                allow_tools = False
-                continue
+                    if leftover and not _is_tool_slop(leftover):
+                        leftover = _catalog.strip_thinking(leftover)
+                        if leftover:
+                            output_parts.append(leftover)
+                    allow_tools = False
+                    continue
 
-            if _use_tools(agent, prompt):
-                transcripts, leftover = await _apply_text_actions(
-                    content, ws, job, agent, broadcast
-                )
-            else:
-                leftover = await _save_desk_files(content, content, ws, job, agent, broadcast)
-                transcripts = []
-            if transcripts:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Put the finished answer in your reply now. No tools.",
-                    }
-                )
-                if leftover and not _is_tool_slop(leftover):
-                    leftover = _catalog.strip_thinking(leftover)
+                if leftover:
+                    leftover = _catalog.strip_thinking(_catalog.collapse_repeats(leftover))
+                    if _is_tool_slop(leftover):
+                        leftover = ""
                     if leftover:
                         output_parts.append(leftover)
-                allow_tools = False
-                continue
+                        if not pump.streamed:
+                            pump.push(leftover, "text")
+                break
 
-            if leftover:
-                leftover = _catalog.strip_thinking(_catalog.collapse_repeats(leftover))
-                if _is_tool_slop(leftover):
-                    leftover = ""
-                if leftover:
-                    output_parts.append(leftover)
-                    if not streamed:
-                        _stream_text(broadcast, job_id, agent["id"], leftover)
-            break
+            final_text = "\n".join(output_parts).strip()
+            import catalog as _catalog
 
-        final_text = "\n".join(output_parts).strip()
-        import catalog as _catalog
-
-        final_text = _catalog.strip_thinking(final_text)
-        if _is_tool_slop(final_text):
-            final_text = ""
-        if not final_text:
-            recap = _workspace_recap(ws)
-            if recap:
-                final_text = recap
-            else:
+            final_text = _catalog.strip_thinking(final_text)
+            if _is_tool_slop(final_text):
+                final_text = ""
+            if not final_text:
+                recap = _workspace_recap(ws)
+                if recap:
+                    final_text = recap
+                else:
+                    try:
+                        data, used_model = await _complete_with_failover(
+                            [
+                                {"role": "system", "content": _system_prompt(agent)},
+                                {
+                                    "role": "user",
+                                    "content": f"{prompt}\n\nWrite the finished answer now in complete sentences. No thinking. No tools.",
+                                },
+                            ],
+                            [used_model],
+                            broadcast,
+                            job_id,
+                            agent["id"],
+                            on_token=on_token,
+                            with_tools=False,
+                        )
+                        final_text = _catalog.strip_thinking(
+                            ((_message_from_choice((data.get("choices") or [{}])[0]).get("content")) or "")
+                        )
+                    except zen.ZenError:
+                        final_text = ""
+            if _catalog.looks_cut_off(final_text):
                 try:
                     data, used_model = await _complete_with_failover(
                         [
-                            {"role": "system", "content": _system_prompt(agent)},
+                            {"role": "assistant", "content": final_text},
                             {
                                 "role": "user",
-                                "content": f"{prompt}\n\nWrite the finished answer now in complete sentences. No thinking. No tools.",
+                                "content": "Continue from the exact point you stopped. Output only the rest of the finished answer. No thinking.",
                             },
                         ],
                         [used_model],
@@ -1063,46 +1108,28 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                         on_token=on_token,
                         with_tools=False,
                     )
-                    final_text = _catalog.strip_thinking(
+                    extra = _catalog.strip_thinking(
                         ((_message_from_choice((data.get("choices") or [{}])[0]).get("content")) or "")
                     )
+                    if extra and extra not in final_text:
+                        final_text = f"{final_text.rstrip()}\n{extra}".strip()
                 except zen.ZenError:
-                    final_text = ""
-        if _catalog.looks_cut_off(final_text):
-            try:
-                data, used_model = await _complete_with_failover(
-                    [
-                        {"role": "assistant", "content": final_text},
-                        {
-                            "role": "user",
-                            "content": "Continue from the exact point you stopped. Output only the rest of the finished answer. No thinking.",
-                        },
-                    ],
-                    [used_model],
-                    broadcast,
-                    job_id,
-                    agent["id"],
-                    on_token=on_token,
-                    with_tools=False,
+                    pass
+            final_text = _done_text(_catalog.collapse_repeats(final_text), ws)
+            if not final_text or _is_junk_output(final_text):
+                final_text, used_model = await _salvage_answer(
+                    job_id, agent, ws, broadcast, prompt, used_model, on_token
                 )
-                extra = _catalog.strip_thinking(
-                    ((_message_from_choice((data.get("choices") or [{}])[0]).get("content")) or "")
-                )
-                if extra and extra not in final_text:
-                    final_text = f"{final_text.rstrip()}\n{extra}".strip()
-            except zen.ZenError:
-                pass
-        final_text = _done_text(_catalog.collapse_repeats(final_text), ws)
-        if not final_text or _is_junk_output(final_text):
-            final_text, used_model = await _salvage_answer(
-                job_id, agent, ws, broadcast, prompt, used_model, on_token
-            )
-        if not final_text or _is_junk_output(final_text):
-            _block_job(job_id, agent, broadcast, "Couldn't finish that job. Assign it again.")
-            return
-        if not streamed:
-            _stream_text(broadcast, job_id, agent["id"], final_text, whole=True)
-        await _finish(job_id, agent, ws, broadcast, final_text, used_model, prompt)
+            if not final_text or _is_junk_output(final_text):
+                _block_job(job_id, agent, broadcast, "Couldn't finish that job. Assign it again.")
+                return
+            if not pump.streamed:
+                pump.push(final_text, "text")
+            await pump.close()
+            await _finish(job_id, agent, ws, broadcast, final_text, used_model, prompt)
+        finally:
+            if not pump.task.done():
+                await pump.close()
     except Exception:
         log.exception("job %s failed", job_id)
         token_cb = locals().get("on_token")
