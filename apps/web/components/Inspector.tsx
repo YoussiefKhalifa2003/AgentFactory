@@ -94,10 +94,10 @@ function jobReply(
   const live =
     working && liveJobId && job.id === liveJobId ? liveTokens || liveThink : "";
   if (live) return friendlyText(live, true);
-  const text = collapseRepeats(friendlyText(job.output || job.error || ""));
+  const text = collapseRepeats(friendlyText(job.output || ""));
   if (text) return text;
+  if (job.status === "blocked") return job.error || "Couldn't finish that job.";
   if (job.status === "done") return "Done.";
-  if (job.status === "blocked") return "Couldn't finish that job.";
   return "";
 }
 
@@ -476,6 +476,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     deleteAgent,
     closeStage,
     updateAgent,
+    setAgents,
     taskTick,
   } = useFactory();
   const agent = agents.find((a) => a.id === selectedId) || agents[0];
@@ -485,6 +486,13 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   const [deleting, setDeleting] = useState(false);
   const [preview, setPreview] = useState<{ jobId: string; file: Artifact } | null>(null);
   const [tray, setTray] = useState<ListItem[]>([]);
+  const [showEarlier, setShowEarlier] = useState(false);
+  const [handError, setHandError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [draftAbout, setDraftAbout] = useState("");
+  const stick = useRef(true);
   const scroller = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -506,13 +514,11 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
 
   const thread = useMemo(() => {
     if (!agent) return [] as Job[];
-    const recent = jobs
-      .filter((j) => j.agent_id === agent.id && !isNoise(j))
-      .slice(0, 8)
-      .reverse();
+    const recent = jobs.filter((j) => j.agent_id === agent.id && !isNoise(j));
+    const visible = showEarlier ? recent.slice().reverse() : recent.slice(0, 8).reverse();
     const current = state?.job;
     const out: Job[] = [];
-    for (const job of recent) {
+    for (const job of visible) {
       const prev = out[out.length - 1];
       if (prev && prev.prompt === job.prompt && (prev.output || "") === (job.output || "")) {
         continue;
@@ -523,11 +529,11 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
       out.push(current);
     }
     return out;
-  }, [agent, jobs, state?.job]);
+  }, [agent, jobs, state?.job, showEarlier]);
 
   useEffect(() => {
     const el = scroller.current;
-    if (!el) return;
+    if (!el || !stick.current) return;
     el.scrollTop = el.scrollHeight;
   }, [thread.length, state?.tokens, state?.job?.status]);
 
@@ -542,8 +548,22 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   function onHand(e: FormEvent) {
     e.preventDefault();
     if (!prompt.trim()) return;
-    assignWork({ agentId: agent.id, text: prompt.trim(), listId: "inbox" }).catch(() => undefined);
-    setPrompt("");
+    const text = prompt.trim();
+    setHandError(null);
+    assignWork({ agentId: agent.id, text, listId: "inbox" })
+      .then(() => setPrompt(""))
+      .catch((err) => setHandError(err instanceof Error ? err.message : "Could not assign"));
+  }
+
+  async function stopJob() {
+    if (!job || stopping) return;
+    setStopping(true);
+    try {
+      const r = await fetch(`${API_URL}/api/jobs/${job.id}/cancel`, { method: "POST" });
+      if (!r.ok) setHandError("Could not stop that job.");
+    } finally {
+      setStopping(false);
+    }
   }
 
   function toggleStrength(id: string) {
@@ -575,6 +595,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         <div className="min-w-0">
           <p className="text-[11px] tracking-[0.22em] uppercase text-[var(--ink-soft)]">Desk</p>
           <h2 className="text-xl font-semibold">{agent.name}</h2>
+          {agent.description && (
+            <p className="truncate text-sm text-[var(--ink-soft)]">{agent.description}</p>
+          )}
         </div>
       </div>
       {!compact && (
@@ -664,18 +687,102 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         >
           {deleting ? "Removing…" : "Remove"}
         </button>
+        {working && (
+          <button type="button" className="btn" disabled={stopping} onClick={stopJob}>
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            setDraftName(agent.name);
+            setDraftAbout(agent.description || "");
+            setEditing((open) => !open);
+          }}
+        >
+          Edit
+        </button>
       </div>
+      {editing && (
+        <form
+          className="mt-3 flex shrink-0 flex-col gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            updateAgent(agent.id, {
+              name: draftName.trim() || agent.name,
+              description: draftAbout,
+            }).then(() => setEditing(false));
+          }}
+        >
+          <input
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            className="rounded-full bg-white px-4 py-2 text-sm outline-none"
+          />
+          <input
+            value={draftAbout}
+            onChange={(e) => setDraftAbout(e.target.value)}
+            placeholder="What this desk is for"
+            className="rounded-full bg-white px-4 py-2 text-sm outline-none"
+          />
+          <label className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
+            Pigment
+            <input
+              type="color"
+              value={agent.pigment}
+              onChange={(e) => updateAgent(agent.id, { pigment: e.target.value })}
+            />
+          </label>
+          <label className="btn w-fit cursor-pointer text-xs">
+            Portrait
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const body = new FormData();
+                body.append("file", file);
+                const r = await fetch(`${API_URL}/api/agents/${agent.id}/pfp`, { method: "POST", body });
+                if (!r.ok) return;
+                const updated = (await r.json()) as typeof agent;
+                setAgents(agents.map((a) => (a.id === agent.id ? updated : a)));
+              }}
+            />
+          </label>
+          <button type="submit" className="btn btn-solid w-fit">
+            Save
+          </button>
+        </form>
+      )}
 
       {waiting.length > 0 && (
-        <p className="mt-3 shrink-0 text-xs text-[var(--ink-soft)]">
-          {waiting.length} waiting on this desk
-        </p>
+        <ul className="mt-3 shrink-0 space-y-1 text-xs text-[var(--ink-soft)]">
+          {waiting.slice(0, 4).map((item) => (
+            <li key={item.id} className="truncate">
+              Waiting · {item.text}
+            </li>
+          ))}
+          {waiting.length > 4 && <li>{waiting.length - 4} more waiting</li>}
+        </ul>
       )}
 
       <div
         ref={scroller}
+        onScroll={() => {
+          const el = scroller.current;
+          if (!el) return;
+          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+        }}
         className="mt-4 min-h-0 flex-1 space-y-3 overflow-auto rounded-2xl bg-white/40 p-3"
       >
+        {jobs.filter((j) => j.agent_id === agent.id && !isNoise(j)).length > 8 && !showEarlier && (
+          <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setShowEarlier(true)}>
+            Earlier on this desk
+          </button>
+        )}
         {thread.length === 0 && (
           <p className="text-sm text-[var(--ink-soft)]">
             Nothing on this desk yet. Assign a to-do from the left.
@@ -695,29 +802,32 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
           const drawioFile = files.find(isDrawioFile);
           const sheetFile = files.find(isSheetFile);
           const pdfFile = files.find(isPdfFile);
+          const imageFile = files.find(isImageFile);
           const viewFile =
             files.find(isHtmlFile) ||
             chartFile ||
             sheetFile ||
             pdfFile ||
             drawioFile ||
-            files.find(isImageFile) ||
+            imageFile ||
             files[0];
-          const extraViews = [sheetFile, pdfFile, drawioFile].filter(
-            (f): f is Artifact => Boolean(f) && f.id !== viewFile?.id
-          );
+          const extraViews = files.filter((file) => file.id !== viewFile?.id);
           return (
-            <div key={item.id} className="space-y-2">
-              <div className="ml-8 rounded-2xl bg-white px-3 py-2 text-sm shadow-sm">
-                {clip(taskTitle({ prompt: item.prompt }), 240)}
-              </div>
+            <article key={item.id} className="space-y-2 rounded-2xl bg-white/70 px-3 py-3">
+              <p className="text-[11px] tracking-[0.16em] uppercase text-[var(--ink-soft)]">
+                {item.status === "blocked"
+                  ? "Needs attention"
+                  : item.status === "cancelled"
+                    ? "Stopped"
+                    : active
+                      ? "Working"
+                      : item.status === "done"
+                        ? "Done"
+                        : "On the desk"}
+              </p>
+              <p className="text-sm font-medium">{clip(taskTitle({ prompt: item.prompt }), 240)}</p>
               {(reply || active) && (
-                <div
-                  className="mr-6 rounded-2xl px-3 py-2"
-                  style={{
-                    background: `color-mix(in srgb, ${agent.pigment} 14%, white)`,
-                  }}
-                >
+                <div className="text-sm">
                   {reply ? (
                     <RichText text={reply} />
                   ) : (
@@ -733,7 +843,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                 </div>
               )}
               {files.length > 0 && (
-                <div className="mr-6 flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2">
                   {viewFile && (
                     <button
                       type="button"
@@ -762,7 +872,20 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                   ))}
                 </div>
               )}
-            </div>
+              {item.status === "blocked" && (
+                <button
+                  type="button"
+                  className="btn px-3 py-1 text-xs"
+                  onClick={() => {
+                    assignWork({ agentId: agent.id, text: item.prompt, listId: "inbox" }).catch((err) =>
+                      setHandError(err instanceof Error ? err.message : "Could not assign")
+                    );
+                  }}
+                >
+                  Hand it again
+                </button>
+              )}
+            </article>
           );
         })}
       </div>
@@ -782,10 +905,11 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
           placeholder={`Hand ${agent.name} a task`}
           className="flex-1 rounded-full bg-white/70 px-4 py-2 text-sm outline-none"
         />
-        <button type="submit" className="btn btn-solid">
-          Assign
+        <button type="submit" className="btn btn-solid" disabled={working}>
+          {working ? "Working" : "Assign"}
         </button>
       </form>
+      {handError && <p className="mt-2 text-xs text-[#b42318]">{handError}</p>}
     </aside>
   );
 }

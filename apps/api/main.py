@@ -126,6 +126,11 @@ async def startup() -> None:
     global loop
     loop = asyncio.get_running_loop()
     db.init_db()
+    for agent in db.list_agents():
+        nxt = lists.start_next(agent["id"])
+        job = (nxt or {}).get("job")
+        if job:
+            harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
 
 
 @app.get("/api/health")
@@ -238,7 +243,7 @@ async def assign_work(body: AssignIn) -> dict[str, Any]:
     job = result.get("job")
     if job:
         broadcast({"type": "job.queued", "job": job})
-        asyncio.create_task(harness.run_job(job["id"], broadcast))
+        harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
     if result.get("item"):
         broadcast({"type": "task.updated", "item": result["item"]})
     return result
@@ -399,17 +404,34 @@ async def submit_job(body: JobIn) -> dict[str, Any]:
     job = result.get("job")
     if job:
         broadcast({"type": "job.queued", "job": job})
-        asyncio.create_task(harness.run_job(job["id"], broadcast))
+        harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
     if result.get("item"):
         broadcast({"type": "task.updated", "item": result["item"]})
     return job or result["item"]
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str) -> dict[str, Any]:
+    if not db.get_job(job_id):
+        raise HTTPException(404, "job not found")
+    if not harness.request_cancel(job_id, broadcast):
+        raise HTTPException(409, "job is not running")
+    return {"ok": True, "id": job_id}
 
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await hub.connect(ws)
     try:
-        await ws.send_text(json.dumps({"type": "hello", "agents": db.list_agents()}))
+        await ws.send_text(
+            json.dumps(
+                {
+                    "type": "hello",
+                    "agents": db.list_agents(),
+                    "jobs": db.in_flight_jobs(),
+                }
+            )
+        )
         while True:
             raw = await ws.receive_text()
             try:
@@ -439,7 +461,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 job = result.get("job")
                 if job:
                     await hub.send({"type": "job.queued", "job": job})
-                    asyncio.create_task(harness.run_job(job["id"], broadcast))
+                    harness.track_job(
+                        job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast))
+                    )
                 if result.get("item"):
                     await hub.send({"type": "task.updated", "item": result["item"]})
     except WebSocketDisconnect:

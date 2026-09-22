@@ -310,9 +310,32 @@ def _collect_artifacts(job: dict[str, Any], agent: dict[str, Any], ws: Path, bro
         broadcast({"type": "job.artifact", "jobId": job["id"], "artifact": art})
 
 
+def _read_quiet(ws: Path, rel: str) -> str:
+    try:
+        return sandbox.read_file(ws, rel)
+    except FileNotFoundError:
+        return ""
+
+
+def _fence_replaces(rel: str, existing: str, body: str) -> bool:
+    """A later complete fence may replace a truncated first write."""
+    if not (existing or "").strip():
+        return True
+    if rel.endswith(".js"):
+        return (not local.js_looks_complete(existing)) and local.js_looks_complete(body)
+    if rel.endswith(".css"):
+        return (not local.css_looks_complete(existing)) and local.css_looks_complete(body)
+    if rel.endswith((".html", ".htm", ".py", ".md")):
+        return (not local._code_balanced(existing)) and len(body) > len(existing)
+    return False
+
+
 def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[bool, str]:
-    strengths = agent.get("strengths") or []
+    strengths = set(agent.get("strengths") or [])
     files = sandbox.list_files(ws)
+    gap = local.site_gap(ws)
+    if gap:
+        return False, gap
 
     if "coding" in strengths:
         for candidate in ("test_main.py", "main.py"):
@@ -321,8 +344,8 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
                 if result["ok"]:
                     return True, f"{candidate} exited 0"
                 note = (result.get("stderr") or result.get("stdout") or "run failed")[:400]
-                return True, f"{candidate} ran with errors: {note}"
-        return True, "reply"
+                return False, f"{candidate} ran with errors: {note}"
+        return (True, "reply") if output else (False, "empty")
 
     if "maths" in strengths:
         for candidate in ("check.py", "solution.py"):
@@ -331,19 +354,21 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
                 out = (result.get("stdout") or "") + (result.get("stderr") or "")
                 if result["ok"]:
                     return True, f"{candidate} verified"
-                return True, (out or "maths check reported errors")[:400]
-        return True, "reply"
+                return False, (out or "maths check reported errors")[:400]
+        return (True, "reply") if output else (False, "empty")
 
     if "research" in strengths:
         report = next((f for f in files if f.endswith(".md")), None)
-        if report:
-            text = sandbox.read_file(ws, report)
-            if re.search(r"https?://", text):
-                return True, "cited URL present"
+        if not report:
+            return False, "Research needs a notes file with a source."
+        text = sandbox.read_file(ws, report)
+        if re.search(r"https?://", text):
+            return True, "cited URL present"
+        if len(text.strip()) > 80 and re.search(r"https?://", prompt or ""):
             return True, "notes"
-        return True, "reply"
+        return False, "Research notes have no source."
 
-    return True, "ok" if output else "empty"
+    return (True, "ok") if output else (False, "empty")
 
 
 def _stream_text(
@@ -371,11 +396,19 @@ class _TokenPump:
         self.q: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
         self.task = asyncio.create_task(self._run())
         self.streamed = False
+        self.text = ""
+        self._since_save = 0
 
     def push(self, delta: str, channel: str = "text") -> None:
         if not delta:
             return
         self.streamed = True
+        if channel == "text":
+            self.text += delta
+            self._since_save += len(delta)
+            if self._since_save >= 480:
+                self._since_save = 0
+                db.update_job(self.job_id, output=self.text)
         self.q.put_nowait((channel, delta))
 
     async def close(self) -> None:
@@ -391,11 +424,12 @@ class _TokenPump:
             if item is None:
                 return
             channel, delta = item
-            step = 28
-            if len(delta) <= 64:
+            if len(delta) > 180:
+                pieces = [delta]
+            elif len(delta) <= 64:
                 pieces = [delta]
             else:
-                pieces = [delta[i : i + step] for i in range(0, len(delta), step)]
+                pieces = [delta[i : i + 28] for i in range(0, len(delta), 28)]
             for piece in pieces:
                 fut = self.broadcast(
                     {
@@ -441,7 +475,11 @@ async def _run_named_tool(
 ) -> str:
     activity, caption = _activity_for_tool(name)
     db.update_job(job["id"], status="tool", activity=activity, caption=caption)
-    db.add_event(job["id"], "tool", {"name": name, "args": args})
+    event_args: dict[str, Any] = dict(args or {})
+    if name == "write_file":
+        body = str(event_args.get("content") or "")
+        event_args = {"path": event_args.get("path") or "file", "bytes": len(body.encode("utf-8"))}
+    db.add_event(job["id"], "tool", {"name": name, "args": event_args})
     broadcast(
         {
             "type": "job.activity",
@@ -643,7 +681,7 @@ async def _apply_text_actions(
         for rel, body in local.extract_fences(content):
             if not rel.endswith((".py", ".md", ".html", ".css", ".js")):
                 continue
-            if rel in present:
+            if rel in present and not _fence_replaces(rel, _read_quiet(ws, rel), body):
                 continue
             await _run_named_tool(
                 ws, "write_file", {"path": rel, "content": body}, job, agent, broadcast
@@ -720,6 +758,48 @@ def _touch_task(job_id: str, status: str, broadcast: Broadcast) -> None:
         broadcast({"type": "task.updated", "item": item})
 
 
+_running: dict[str, asyncio.Task] = {}
+
+
+def track_job(job_id: str, task: asyncio.Task) -> None:
+    _running[job_id] = task
+
+
+def request_cancel(job_id: str, broadcast: Broadcast | None = None) -> bool:
+    job = db.get_job(job_id)
+    if not job or job.get("status") not in {"queued", "thinking", "tool"}:
+        return False
+    task = _running.get(job_id)
+    if task and not task.done():
+        task.cancel()
+        return True
+    _settle_cancel(job_id, job, broadcast)
+    return True
+
+
+def _settle_cancel(job_id: str, job: dict[str, Any], broadcast: Broadcast | None = None) -> None:
+    db.update_job(
+        job_id,
+        status="cancelled",
+        activity="cancelled",
+        caption="Stopped",
+        error="Stopped from the desk",
+    )
+    if job.get("task_id"):
+        db.update_item(str(job["task_id"]), status="open", job_id=None)
+    if broadcast:
+        broadcast(
+            {
+                "type": "job.cancelled",
+                "jobId": job_id,
+                "agentId": job.get("agent_id"),
+                "caption": "Stopped",
+                "error": "Stopped from the desk",
+            }
+        )
+        _kick_next(str(job.get("agent_id") or ""), broadcast)
+
+
 def _kick_next(agent_id: str, broadcast: Broadcast) -> None:
     nxt = lists.start_next(agent_id)
     if not nxt or not nxt.get("job"):
@@ -733,7 +813,8 @@ def _kick_next(agent_id: str, broadcast: Broadcast) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(run_job(nxt["job"]["id"], broadcast))
+    task = loop.create_task(run_job(nxt["job"]["id"], broadcast))
+    track_job(nxt["job"]["id"], task)
 
 
 def _has_skill(agent: dict[str, Any], name: str) -> bool:
@@ -785,25 +866,76 @@ def _assistant_tool_message(content: str, tool_calls: list[dict[str, Any]]) -> d
     return {"role": "assistant", "content": content or "", "tool_calls": cleaned}
 
 
-def _block_job(job_id: str, agent: dict[str, Any], broadcast: Broadcast, note: str) -> None:
+def _text_from_slop(text: str) -> str:
+    """Pull a plan or answer out of a tool-call blob local models sometimes emit."""
+    blob = (text or "").strip()
+    if not blob:
+        return ""
+    data: Any = None
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        for key in ("content", "plan", "answer", "text"):
+            val = data.get(key)
+            if isinstance(val, str) and len(val.strip()) > 24:
+                return val.strip()
+        args = data.get("arguments")
+        fn = data.get("function") if isinstance(data.get("function"), dict) else {}
+        if args is None and fn:
+            args = fn.get("arguments")
+        if isinstance(args, str):
+            pulled = _text_from_slop(args)
+            if pulled:
+                return pulled
+        if isinstance(args, dict):
+            inner = args.get("content")
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()
+    match = re.search(r'"content"\s*:\s*"((?:\\.|[^"\\])*)"', blob)
+    if match:
+        try:
+            loaded = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            loaded = match.group(1)
+        if isinstance(loaded, str) and loaded.strip():
+            return loaded.strip()
+    lines = [ln for ln in blob.splitlines() if re.match(r"\s*\d+[\.)]\s+\S", ln)]
+    if len(lines) >= 2:
+        return "\n".join(lines)
+    return ""
+
+
+def _block_job(
+    job_id: str,
+    agent: dict[str, Any],
+    broadcast: Broadcast,
+    note: str,
+    output: str | None = None,
+) -> None:
+    job = db.get_job(job_id) or {}
+    kept = output if output is not None else str(job.get("output") or "")
+    if kept.strip() == (note or "").strip():
+        kept = ""
+    short = (note or "Couldn't complete").split("\n", 1)[0][:180]
     db.update_job(
         job_id,
         status="blocked",
         activity="blocked",
-        caption="Couldn't complete",
+        caption=short,
         error=note,
-        output=note,
+        output=kept,
     )
-    _stream_text(broadcast, job_id, agent["id"], note, whole=True)
     broadcast(
         {
             "type": "job.blocked",
             "jobId": job_id,
             "agentId": agent["id"],
             "error": note,
-            "output": note,
+            "output": kept,
             "activity": "blocked",
-            "caption": "Couldn't complete",
+            "caption": short,
         }
     )
     _touch_task(job_id, "blocked", broadcast)
@@ -843,8 +975,10 @@ async def _salvage_answer(
         text = _catalog.strip_thinking(
             ((_message_from_choice((data.get("choices") or [{}])[0]).get("content")) or "")
         )
-        if _is_junk_output(text) or _is_tool_slop(text):
+        if _is_junk_output(text):
             text = ""
+        elif _is_tool_slop(text):
+            text = _text_from_slop(text)
         return text, used_model
     except zen.ZenError:
         return "", used_model
@@ -864,31 +998,11 @@ async def _finish(
         return
     local.materialize_site(ws, output)
     local.heal_site(ws)
-    _collect_artifacts(job, agent, ws, broadcast)
     ok, note = _verify(agent, ws, prompt, output)
     if not ok:
-        db.update_job(
-            job_id,
-            status="blocked",
-            activity="blocked",
-            caption=note,
-            output=output,
-            error=note,
-        )
-        broadcast(
-            {
-                "type": "job.blocked",
-                "jobId": job_id,
-                "agentId": agent["id"],
-                "error": note,
-                "caption": note,
-                "output": output,
-                "model": used_model,
-            }
-        )
-        _touch_task(job_id, "blocked", broadcast)
-        _kick_next(agent["id"], broadcast)
+        _block_job(job_id, agent, broadcast, note, output=output)
         return
+    _collect_artifacts(job, agent, ws, broadcast)
     db.update_job(
         job_id,
         status="done",
@@ -896,6 +1010,7 @@ async def _finish(
         caption="Done",
         output=output,
         error=None,
+        model=used_model,
     )
     broadcast(
         {
@@ -1064,7 +1179,7 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                 if leftover:
                     leftover = _catalog.strip_thinking(_catalog.collapse_repeats(leftover))
                     if _is_tool_slop(leftover):
-                        leftover = ""
+                        leftover = _text_from_slop(leftover) if not allow_tools else ""
                     if leftover:
                         output_parts.append(leftover)
                         if not pump.streamed:
@@ -1081,7 +1196,7 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
 
             final_text = _catalog.strip_thinking(final_text)
             if _is_tool_slop(final_text):
-                final_text = ""
+                final_text = _text_from_slop(final_text) if not _use_tools(agent, prompt) else ""
             if not final_text:
                 recap = _workspace_recap(ws)
                 if recap:
@@ -1133,6 +1248,10 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                 except zen.ZenError:
                     pass
             final_text = _done_text(_catalog.collapse_repeats(final_text), ws)
+            if (not final_text or _is_junk_output(final_text)) and local.site_gap(ws) is None:
+                files = sandbox.list_files(ws)
+                if any(name.endswith((".html", ".htm")) for name in files):
+                    final_text = "Built a page. Use View on this desk."
             if not final_text or _is_junk_output(final_text):
                 final_text, used_model = await _salvage_answer(
                     job_id, agent, ws, broadcast, prompt, used_model, on_token
@@ -1147,6 +1266,17 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
         finally:
             if not pump.task.done():
                 await pump.close()
+    except asyncio.CancelledError:
+        current = db.get_job(job_id) or job
+        _settle_cancel(job_id, current, broadcast)
+        return
+    except zen.ZenError as err:
+        partial = ""
+        pump_live = locals().get("pump")
+        if pump_live is not None:
+            partial = getattr(pump_live, "text", "") or ""
+        _block_job(job_id, agent, broadcast, err.message or "The model couldn’t run.", output=partial)
+        return
     except Exception:
         log.exception("job %s failed", job_id)
         token_cb = locals().get("on_token")

@@ -12,18 +12,23 @@ const GROUPS: { id: string; label: string }[] = [
 export function useModelCatalog() {
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
   const [defaultId, setDefaultId] = useState("big-pickle");
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     fetch(`${API_URL}/api/models`)
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error("models");
+        return r.json();
+      })
       .then((data) => {
         setCatalog(Array.isArray(data.catalog) ? data.catalog : []);
         if (data.default) setDefaultId(data.default);
+        setFailed(false);
       })
-      .catch(() => undefined);
+      .catch(() => setFailed(true));
   }, []);
 
-  return { catalog, defaultId };
+  return { catalog, defaultId, failed };
 }
 
 export function ModelPicker({
@@ -35,7 +40,7 @@ export function ModelPicker({
   onChange: (id: string) => void;
   compact?: boolean;
 }) {
-  const { catalog, defaultId } = useModelCatalog();
+  const { catalog, defaultId, failed } = useModelCatalog();
   const selected = value || defaultId;
 
   useEffect(() => {
@@ -49,6 +54,10 @@ export function ModelPicker({
       models: catalog.filter((m) => m.provider === group.id),
     })).filter((g) => g.models.length > 0);
   }, [catalog]);
+
+  if (failed) {
+    return <p className="text-sm text-[#b42318]">Couldn’t load models.</p>;
+  }
 
   if (catalog.length === 0) {
     return (

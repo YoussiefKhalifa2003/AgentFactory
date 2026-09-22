@@ -22,6 +22,7 @@ export function ListsSidebar({
   const [meetingsFound, setMeetingsFound] = useState<boolean | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const [removing, setRemoving] = useState(false);
+  const [query, setQuery] = useState("");
 
   const openList = lists.find((l) => l.id === openId) || null;
   const isMeeting = openList?.kind === "meeting";
@@ -69,9 +70,11 @@ export function ListsSidebar({
   }, [openId, taskTick]);
 
   const visible = useMemo(() => {
-    if (isMeeting && mine) return items.filter((item) => item.mine);
-    return items;
-  }, [items, isMeeting, mine]);
+    const base = isMeeting && mine ? items.filter((item) => item.mine) : items;
+    const q = query.trim().toLowerCase();
+    if (!q) return base;
+    return base.filter((item) => item.text.toLowerCase().includes(q));
+  }, [items, isMeeting, mine, query]);
 
   const visibleIds = useMemo(() => visible.map((item) => item.id), [visible]);
   const allPicked = visibleIds.length > 0 && visibleIds.every((id) => picked.includes(id));
@@ -88,6 +91,7 @@ export function ListsSidebar({
   async function removePicked() {
     const ids = picked.filter((id) => visibleIds.includes(id));
     if (!ids.length || removing) return;
+    if (!confirm(`Delete ${ids.length} task${ids.length === 1 ? "" : "s"}?`)) return;
     setRemoving(true);
     try {
       await Promise.all(
@@ -250,6 +254,12 @@ export function ListsSidebar({
           )}
         </div>
         <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search this list"
+            className="mb-2 w-full rounded-full bg-white px-4 py-2 text-sm outline-none"
+          />
           {visible.length === 0 && (
             <p className="px-2 py-6 text-center text-sm text-[var(--ink-soft)]">
               {openList ? "This list is empty." : "Select a list."}
@@ -281,6 +291,7 @@ export function ListsSidebar({
                     togglePick(item.id);
                     return;
                   }
+                  if (item.status === "open" || item.status === "blocked") return;
                   onItemClick(item);
                 }}
                 className={`mb-2 rounded-2xl px-3 py-3 hover:bg-white ${
@@ -313,6 +324,18 @@ export function ListsSidebar({
                     >
                       {(assigned || best)?.name}
                     </span>
+                  )}
+                  {(item.status === "open" || item.status === "blocked") && (
+                    <button
+                      type="button"
+                      className="btn px-2 py-1 text-[11px]"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onItemClick(item);
+                      }}
+                    >
+                      Assign
+                    </button>
                   )}
                 </div>
               </article>

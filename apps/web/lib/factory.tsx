@@ -32,6 +32,8 @@ type FactoryContextValue = {
   selectedId: string | null;
   stageOpen: boolean;
   connected: boolean;
+  booted: boolean;
+  offline: boolean;
   taskTick: number;
   select: (id: string | null) => void;
   openStage: (id: string) => void;
@@ -58,16 +60,26 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [stageOpen, setStageOpen] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [booted, setBooted] = useState(false);
+  const [offline, setOffline] = useState(false);
   const [taskTick, setTaskTick] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
 
   const refresh = useCallback(async () => {
-    const [a, j] = await Promise.all([
-      fetch(`${API_URL}/api/agents`).then((r) => r.json()),
-      fetch(`${API_URL}/api/jobs`).then((r) => r.json()),
-    ]);
-    setAgents(a);
-    setJobs(j);
+    try {
+      const [ar, jr] = await Promise.all([
+        fetch(`${API_URL}/api/agents`),
+        fetch(`${API_URL}/api/jobs`),
+      ]);
+      if (!ar.ok || !jr.ok) throw new Error("api");
+      setAgents(await ar.json());
+      setJobs(await jr.json());
+      setOffline(false);
+    } catch {
+      setOffline(true);
+    } finally {
+      setBooted(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -158,9 +170,36 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
         if (!closed) timer = setTimeout(connect, 1500);
       };
       ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === "hello" && msg.agents) {
-          setAgents(msg.agents);
+        let msg: { type?: string; [key: string]: unknown };
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (msg.type === "hello") {
+          if (Array.isArray(msg.agents)) setAgents(msg.agents as Agent[]);
+          const incoming = (Array.isArray(msg.jobs) ? msg.jobs : []) as Job[];
+          if (incoming.length) {
+            setJobs((prev) => {
+              const map = new Map(prev.map((job) => [job.id, job]));
+              for (const job of incoming) map.set(job.id, { ...map.get(job.id), ...job });
+              return [...map.values()];
+            });
+            setLive((prev) => {
+              const next = { ...prev };
+              for (const job of incoming) {
+                const cur = next[job.agent_id];
+                const kept = cur?.job?.id === job.id ? cur.tokens || "" : "";
+                next[job.agent_id] = {
+                  job,
+                  tokens: kept.length >= (job.output || "").length ? kept : job.output || "",
+                  think: cur?.think || "",
+                  artifacts: cur?.artifacts?.length ? cur.artifacts : job.artifacts || [],
+                };
+              }
+              return next;
+            });
+          }
         }
         if (msg.type === "agent.updated" && msg.agent) {
           const next = msg.agent as Agent;
@@ -193,22 +232,27 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
             [job.agent_id]: { job, tokens: "", think: "", artifacts: [] },
           }));
         }
-        if (msg.type === "job.done" || msg.type === "job.blocked") {
+        if (msg.type === "job.done" || msg.type === "job.blocked" || msg.type === "job.cancelled") {
           if (raf) {
             cancelAnimationFrame(raf);
             raf = 0;
           }
-          if (msg.agentId) delete tokenBuf[msg.agentId];
+          if (msg.agentId) delete tokenBuf[String(msg.agentId)];
+          const status =
+            msg.type === "job.done" ? "done" : msg.type === "job.cancelled" ? "cancelled" : "blocked";
           setJobs((prev) =>
             prev.map((j) =>
               j.id === msg.jobId
                 ? {
                     ...j,
-                    status: msg.type === "job.done" ? "done" : "blocked",
-                    activity: msg.activity || j.activity,
-                    caption: msg.caption || j.caption,
-                    output: msg.output ?? j.output,
-                    error: msg.error ?? j.error,
+                    status,
+                    activity: (msg.activity as string) || j.activity,
+                    caption: (msg.caption as string) || j.caption,
+                    output:
+                      String(msg.output || "").length >= (j.output || "").length
+                        ? ((msg.output as string) ?? j.output)
+                        : j.output,
+                    error: (msg.error as string) ?? j.error,
                   }
                 : j
             )
@@ -254,7 +298,9 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
                   ? "done"
                   : msg.type === "job.blocked"
                     ? "blocked"
-                    : cur.job?.status || "thinking",
+                    : msg.type === "job.cancelled"
+                      ? "cancelled"
+                      : cur.job?.status || "thinking",
               output: msg.output ?? cur.job?.output ?? "",
               error: msg.error ?? cur.job?.error ?? null,
               id: msg.jobId,
@@ -267,9 +313,10 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
               think = "";
               delete tokenBuf[msg.agentId];
             }
-            if (msg.type === "job.done") {
-              tokens = msg.output || tokens;
-              think = "";
+            if (msg.type === "job.done" || msg.type === "job.blocked") {
+              const incoming = String(msg.output || "");
+              tokens = incoming.length >= tokens.length ? incoming || tokens : tokens;
+              if (msg.type === "job.done") think = "";
             }
             const artifacts =
               msg.type === "job.artifact" && msg.artifact
@@ -373,6 +420,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       selectedId,
       stageOpen,
       connected,
+      booted,
+      offline,
       taskTick,
       select: setSelectedId,
       openStage: (id: string) => {
@@ -400,6 +449,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       selectedId,
       stageOpen,
       connected,
+      booted,
+      offline,
       taskTick,
       submitJob,
       assignWork,

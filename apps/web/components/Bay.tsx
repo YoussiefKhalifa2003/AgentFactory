@@ -1,7 +1,7 @@
 "use client";
 
-import { DragEvent, useState } from "react";
-import { Agent, badgeDataUrl, pfpSrc, strengthLabel } from "@/lib/types";
+import { DragEvent, useEffect, useState } from "react";
+import { Agent, API_URL, badgeDataUrl, pfpSrc, strengthLabel } from "@/lib/types";
 import { useFactory } from "@/lib/factory";
 import { parseTaskDrag } from "@/lib/tasks";
 
@@ -21,10 +21,26 @@ export function Bay({
 }) {
   const { live, selectedId, assignWork, select } = useFactory();
   const [dropOver, setDropOver] = useState(false);
+  const [waiting, setWaiting] = useState(0);
   const state = live[agent.id];
   const activity = state?.job?.activity || "idle";
   const liveNow = Boolean(state?.job) && !["done", "idle", "blocked"].includes(state.job?.status || activity);
   const portrait = pfpSrc(agent.pfp) || badgeDataUrl(agent.name, agent.pigment);
+
+  useEffect(() => {
+    let stop = false;
+    fetch(`${API_URL}/api/agents/${agent.id}/tray`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (stop) return;
+        const items = (data.items || []) as { status?: string }[];
+        setWaiting(items.filter((item) => item.status === "assigned").length);
+      })
+      .catch(() => undefined);
+    return () => {
+      stop = true;
+    };
+  }, [agent.id, liveNow]);
 
   function onDragOver(e: DragEvent) {
     const types = [...e.dataTransfer.types];
@@ -60,6 +76,7 @@ export function Bay({
       onDragOver={onDragOver}
       onDragLeave={() => setDropOver(false)}
       onDrop={onDrop}
+      aria-selected={selectedId === agent.id}
       className={`bay w-full cursor-pointer rounded-[24px] bg-white p-5 text-left shadow-sm ${liveNow ? "is-live" : ""} ${selectedId === agent.id ? "is-selected" : ""} ${dropOver ? "is-drop" : ""}`}
       style={{
         ["--pigment" as string]: agent.pigment,
@@ -91,7 +108,13 @@ export function Bay({
       </div>
       <div className="relative z-[1] mt-4 flex items-center justify-between gap-2">
         <p className="text-xs text-[var(--ink-soft)]">
-          {dropOver ? `Assign to ${agent.name}` : statusLabel(activity, state?.job?.status)}
+          {dropOver
+            ? `Assign to ${agent.name}`
+            : state?.job?.caption && liveNow
+              ? state.job.caption
+              : waiting
+                ? `${waiting} waiting`
+                : statusLabel(activity, state?.job?.status)}
         </p>
       </div>
     </div>

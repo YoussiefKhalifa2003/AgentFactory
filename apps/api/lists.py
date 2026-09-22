@@ -121,11 +121,13 @@ def start_next(agent_id: str) -> dict[str, Any] | None:
     agent = db.get_agent(agent_id)
     if not agent:
         return None
-    job = db.create_job(agent_id, item["prompt"], task_id=item["id"])
-    updated = db.update_item(
-        item["id"], status="working", job_id=job["id"], agent_id=agent_id
-    )
-    return {"item": updated, "job": job, "agent": agent, "queued": False}
+    claimed = db.claim_or_queue(agent_id, item["id"], item["prompt"])
+    return {
+        "item": claimed.get("item"),
+        "job": claimed.get("job"),
+        "agent": agent,
+        "queued": bool(claimed.get("queued")),
+    }
 
 
 def assign(
@@ -156,20 +158,10 @@ def assign(
     if not agent:
         raise LookupError("no agent")
 
-    if db.agent_busy(agent["id"]):
-        updated = db.update_item(
-            item["id"],
-            status="assigned",
-            agent_id=agent["id"],
-            job_id=None,
-        )
-        return {"item": updated, "job": None, "agent": agent, "queued": True}
-
-    job = db.create_job(agent["id"], item["prompt"], task_id=item["id"])
-    updated = db.update_item(
-        item["id"],
-        status="working",
-        agent_id=agent["id"],
-        job_id=job["id"],
-    )
-    return {"item": updated, "job": job, "agent": agent, "queued": False}
+    claimed = db.claim_or_queue(agent["id"], item["id"], item["prompt"])
+    return {
+        "item": claimed.get("item") or item,
+        "job": claimed.get("job"),
+        "agent": agent,
+        "queued": bool(claimed.get("queued")),
+    }

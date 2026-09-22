@@ -155,7 +155,20 @@ def label_for(model_id: str) -> str:
 
 def failover_chain(primary: str) -> list[str]:
     mid = (primary or "").strip() or default_model_id()
-    return [mid]
+    chain = [mid]
+    primary_provider, _backend = parse_model(mid)
+    extras: list[str] = []
+    if openrouter_enabled():
+        extras.append("openrouter:deepseek/deepseek-chat")
+    if os.getenv("OPENCODE_API_KEY") and zen.CHAT_MODELS:
+        extras.append(zen.CHAT_MODELS[0])
+    extras.append("local:qwen3:14b")
+    for item in extras:
+        provider, _backend = parse_model(item)
+        if provider == primary_provider or item in chain:
+            continue
+        chain.append(item)
+    return chain
 
 
 def _openrouter_headers() -> dict[str, str]:
@@ -358,7 +371,9 @@ class _WriteFileStream:
             if isinstance(raw, dict):
                 self.args[idx] = json.dumps(raw, ensure_ascii=False)
             else:
-                self.args[idx] = self.args.get(idx, "") + str(raw)
+                incoming = str(raw)
+                prev = self.args.get(idx, "")
+                self.args[idx] = _merge_arg_text(prev, incoming)
             name = self.names.get(idx, "")
             if name and name != "write_file":
                 continue
@@ -501,6 +516,17 @@ class _StreamGate:
         return collapse_repeats(strip_thinking(self.content))
 
 
+def _merge_arg_text(previous: str, incoming: str) -> str:
+    """Ollama often resends the whole tool-call snapshot. Don't concatenate those."""
+    if not previous:
+        return incoming
+    if incoming.startswith(previous) or previous.startswith(incoming):
+        return incoming if len(incoming) >= len(previous) else previous
+    if incoming.startswith("{") and previous.startswith("{"):
+        return incoming if len(incoming) >= len(previous) else previous
+    return previous + incoming
+
+
 def _merge_tool_delta(acc: dict[int, dict[str, Any]], deltas: list[Any]) -> None:
     for item in deltas:
         if not isinstance(item, dict):
@@ -521,7 +547,8 @@ def _merge_tool_delta(acc: dict[int, dict[str, Any]], deltas: list[Any]) -> None
             args = fn["arguments"]
             if not isinstance(args, str):
                 args = json.dumps(args)
-            slot["function"]["arguments"] += args
+            prev = slot["function"]["arguments"]
+            slot["function"]["arguments"] = _merge_arg_text(prev, args)
 
 
 def _packed_message(
@@ -856,89 +883,93 @@ async def complete_with_failover(
     on_think: TokenCb | None = None,
 ) -> tuple[dict[str, Any], str]:
     await refresh_local()
-    model_id = (preferred or "").strip() or default_model_id()
-    provider, backend = parse_model(model_id)
-    label = label_for(model_id)
-    if provider == "openrouter" and not openrouter_enabled():
-        raise zen.ZenError(401, f"{label} needs an OpenRouter key in .env")
-
-    gpu_held = False
-    if provider == "local":
-        if _gpu_lock.locked() and on_caption:
-            on_caption("Waiting for the local GPU…")
-        await _gpu_lock.acquire()
-        gpu_held = True
-
-    try:
-        if on_caption:
-            on_caption("Working")
-
-        async def run(use_tools: list[dict[str, Any]] | None) -> dict[str, Any]:
-            pulse_alive = True
-
-            async def beat() -> None:
-                try:
-                    await asyncio.sleep(12)
-                    if on_caption:
-                        on_caption("Still working…")
-                except asyncio.CancelledError:
-                    return
-
-            def wrapped_token(delta: str) -> None:
-                nonlocal pulse_alive
-                if pulse_alive:
-                    pulse_alive = False
-                    pulse.cancel()
-                    if on_caption:
-                        on_caption("Writing")
-                if on_token:
-                    on_token(delta)
-
-            def wrapped_think(delta: str) -> None:
-                nonlocal pulse_alive
-                if pulse_alive:
-                    pulse_alive = False
-                    pulse.cancel()
-                if on_think:
-                    on_think(delta)
-
-            pulse = asyncio.create_task(beat())
-            try:
-                return await chat(
-                    model_id,
-                    messages,
-                    tools=use_tools,
-                    on_token=wrapped_token,
-                    on_think=wrapped_think,
-                )
-            finally:
-                pulse.cancel()
-
+    chain = failover_chain(preferred)
+    last_error: zen.ZenError | None = None
+    for model_id in chain:
+        provider, _backend = parse_model(model_id)
+        label = label_for(model_id)
+        if provider == "openrouter" and not openrouter_enabled():
+            last_error = zen.ZenError(401, f"{label} needs an OpenRouter key in .env")
+            continue
+        gpu_held = False
         try:
-            data = await run(tools)
-        except zen.ZenError as e:
-            if tools and is_tool_json_error(e.message):
+            if provider == "local":
+                if _gpu_lock.locked() and on_caption:
+                    on_caption("Waiting for the local GPU…")
+                await _gpu_lock.acquire()
+                gpu_held = True
+            if on_caption:
+                on_caption(f"Working with {label}" if len(chain) > 1 and model_id != chain[0] else "Working")
+
+            async def run(use_tools: list[dict[str, Any]] | None) -> dict[str, Any]:
+                pulse_alive = True
+
+                async def beat() -> None:
+                    try:
+                        await asyncio.sleep(12)
+                        if on_caption:
+                            on_caption("Still working…")
+                    except asyncio.CancelledError:
+                        return
+
+                def wrapped_token(delta: str) -> None:
+                    nonlocal pulse_alive
+                    if pulse_alive:
+                        pulse_alive = False
+                        pulse.cancel()
+                        if on_caption:
+                            on_caption("Writing")
+                    if on_token:
+                        on_token(delta)
+
+                def wrapped_think(delta: str) -> None:
+                    nonlocal pulse_alive
+                    if pulse_alive:
+                        pulse_alive = False
+                        pulse.cancel()
+                    if on_think:
+                        on_think(delta)
+
+                pulse = asyncio.create_task(beat())
+                try:
+                    return await chat(
+                        model_id,
+                        messages,
+                        tools=use_tools,
+                        on_token=wrapped_token,
+                        on_think=wrapped_think,
+                    )
+                finally:
+                    pulse.cancel()
+
+            try:
+                data = await run(tools)
+            except zen.ZenError as e:
+                if tools and is_tool_json_error(e.message):
+                    try:
+                        data = await run(None)
+                    except zen.ZenError as again:
+                        last_error = again
+                        if on_caption:
+                            on_caption(f"{label} couldn’t run")
+                        continue
+                else:
+                    last_error = e
+                    if on_caption:
+                        on_caption(f"{label} couldn’t run")
+                    continue
+
+            msg = ((data.get("choices") or [{}])[0].get("message") or {})
+            if tools and not (msg.get("content") or "").strip() and not (msg.get("tool_calls") or []):
                 try:
                     data = await run(None)
                 except zen.ZenError:
-                    if on_caption:
-                        on_caption(f"{label} couldn’t run")
-                    raise
-            else:
-                if on_caption:
-                    on_caption(f"{label} couldn’t run")
-                raise
-
-        msg = ((data.get("choices") or [{}])[0].get("message") or {})
-        if tools and not (msg.get("content") or "").strip() and not (msg.get("tool_calls") or []):
-            try:
-                data = await run(None)
-            except zen.ZenError:
-                pass
-        return data, model_id
-    finally:
-        if gpu_held:
-            _gpu_lock.release()
+                    pass
+            return data, model_id
+        finally:
+            if gpu_held:
+                _gpu_lock.release()
+    raise last_error or zen.ZenError(502, "No model could run this job")
 
 
 async def snapshot() -> dict[str, Any]:

@@ -142,6 +142,17 @@ def js_looks_complete(text: str) -> bool:
     return True
 
 
+def css_looks_complete(text: str) -> bool:
+    blob = strip_model_tail(text or "").strip()
+    if len(blob) < 20:
+        return False
+    if re.search(r"```|</style>|^#{1,3} ", blob, re.M | re.I):
+        return False
+    if not _code_balanced(blob):
+        return False
+    return not bool(re.search(r"[{:;,]\s*$", blob))
+
+
 def _looks_like_game(html: str) -> bool:
     return bool(re.search(r"<canvas\b|gameCanvas|requestAnimationFrame", html or "", re.I))
 
@@ -179,22 +190,24 @@ def fallback_game_js() -> str:
 
 
 def heal_site(ws: Path) -> None:
-    """If a game page is missing or cut-off JS, drop in a complete playable script."""
+    """Link an existing script if the page forgot the tag. Never replace the agent's file."""
     files = set(sandbox.list_files(ws))
     htmls = [name for name in files if name.endswith((".html", ".htm"))]
-    if not htmls:
+    if not htmls or "script.js" not in files:
         return
     html = sandbox.read_file(ws, htmls[0])
-    if not _looks_like_game(html) and not SCRIPT_SRC.search(html or ""):
+    if SCRIPT_SRC.search(html or "") or SCRIPT_BLOCK.search(html or ""):
         return
-    if _site_js_playable(ws, html):
-        return
-    sandbox.write_file(ws, "script.js", fallback_game_js())
-    if not SCRIPT_SRC.search(html or ""):
-        patched = re.sub(r"</body>", '<script src="script.js"></script>\n</body>', html, count=1, flags=re.I)
-        if patched == html:
-            patched = html.rstrip() + '\n<script src="script.js"></script>\n'
-        sandbox.write_file(ws, htmls[0], patched)
+    patched = re.sub(
+        r"</body>",
+        '<script src="script.js"></script>\n</body>',
+        html,
+        count=1,
+        flags=re.I,
+    )
+    if patched == html:
+        patched = html.rstrip() + '\n<script src="script.js"></script>\n'
+    sandbox.write_file(ws, htmls[0], patched)
 
 
 def site_gap(ws: Path) -> str | None:
@@ -239,12 +252,31 @@ def site_gap(ws: Path) -> str | None:
                     "write_file the complete file from the first line to the last closing brace. "
                     "Keep it a finished 2D game, not a huge engine. Raw JavaScript only."
                 )
+    css_linked = [_safe_asset_name(name, "") for name in LINK_CSS.findall(html)]
+    css_linked = [name for name in css_linked if name]
+    missing_css = [name for name in css_linked if name not in files]
+    if missing_css:
+        return (
+            f"{missing_css[0]} is linked from the page but missing. "
+            "write_file the COMPLETE stylesheet now. Raw CSS only, no markdown."
+        )
     css_files = [f for f in files if f.endswith(".css")]
+    if (interactive or css_linked) and not css_files and not STYLE_BLOCK.search(html):
+        return (
+            "This page needs styles.css. write_file the COMPLETE stylesheet now. "
+            "Raw CSS only, no markdown."
+        )
     for name in css_files:
         body = sandbox.read_file(ws, name)
         tidy = strip_model_tail(body)
         if tidy != body:
             sandbox.write_file(ws, name, tidy)
+            body = tidy
+        if not css_looks_complete(body):
+            return (
+                f"{name} was cut off. write_file the complete stylesheet "
+                "from the first rule to the last closing brace. Raw CSS only."
+            )
     return None
 
 
@@ -381,11 +413,13 @@ def _ensure_canvas_size(match: re.Match[str]) -> str:
 
 def playable_page(ws: Path, html: str, base: str = "") -> str:
     """Make View a real playable document: load local files and fix overlay/click traps."""
-    heal_site(ws)
     blob = decode_written_text(html or "")
     blob = re.sub(r"<canvas\b[^>]*>", _ensure_canvas_size, blob, count=1, flags=re.I)
-    if not _site_js_playable(ws, blob):
-        blob = re.sub(r"<script\b[^>]*\bsrc\b[^>]*>\s*</script>", "", blob, flags=re.I)
+    files = set(sandbox.list_files(ws))
+    has_js = any(name.endswith(".js") for name in files) or bool(
+        SCRIPT_BLOCK.search(blob) or SCRIPT_SRC.search(blob)
+    )
+    if _looks_like_game(blob) and not has_js:
         game = f"<script id=\"desk-game\">{fallback_game_js()}</script>\n"
         if re.search(r"</body>", blob, re.I):
             blob = re.sub(r"</body>", game + "</body>", blob, count=1, flags=re.I)

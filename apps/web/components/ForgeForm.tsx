@@ -24,6 +24,7 @@ export function ForgeForm() {
   const router = useRouter();
   const { tools } = useSkillCatalog();
   const [step, setStep] = useState(0);
+  const [colorSet, setColorSet] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pigment, setPigment] = useState("#D46A3A");
@@ -116,7 +117,7 @@ export function ForgeForm() {
                 value={name}
                 onChange={(e) => {
                   setName(e.target.value);
-                  if (!name) setPigment(pigmentFromName(e.target.value));
+                  if (!colorSet) setPigment(pigmentFromName(e.target.value));
                 }}
                 className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-3 outline-none"
                 placeholder="Newton"
@@ -128,7 +129,10 @@ export function ForgeForm() {
               <input
                 type="color"
                 value={pigment}
-                onChange={(e) => setPigment(e.target.value)}
+                onChange={(e) => {
+                  setColorSet(true);
+                  setPigment(e.target.value);
+                }}
                 className="mt-2 h-12 w-full rounded-2xl bg-transparent"
               />
             </label>
@@ -236,6 +240,7 @@ export function ForgeForm() {
           {step < 2 && (
             <button
               type="button"
+              disabled={step === 0 && !name.trim()}
               onClick={() => setStep((s) => s + 1)}
               className="btn btn-solid"
             >

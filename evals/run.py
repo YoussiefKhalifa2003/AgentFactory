@@ -34,6 +34,14 @@ def wait_job(job_id: str, timeout: int = 180) -> dict:
 
 
 def main() -> int:
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from quality import main as quality_main
+
+    code = quality_main()
+    if code:
+        return code
     health = req("GET", "/api/health")
     print("health", health)
     coding = req(

@@ -117,6 +117,7 @@ def init_db() -> None:
             """
         )
         _ensure_column(con, "jobs", "task_id", "TEXT")
+        _ensure_column(con, "jobs", "model", "TEXT")
         con.commit()
         con.close()
     seed_starters()
@@ -246,20 +247,37 @@ def delete_agent(agent_id: str) -> bool:
 
 
 def recover_stuck_jobs() -> None:
-    """Reload kills in-flight harness tasks; don't leave bays spinning forever."""
+    """A reload killed the task. Put the list item back in the queue."""
+    now = utcnow()
     with _lock:
         con = connect()
-        con.execute(
+        rows = con.execute(
             """
-            UPDATE jobs
-            SET status='blocked', activity='blocked',
-                caption='Interrupted — send the job again',
-                error='The server restarted while this job was running.',
-                updated_at=?
+            SELECT id, task_id FROM jobs
             WHERE status IN ('queued', 'thinking', 'tool')
-            """,
-            (utcnow(),),
-        )
+            """
+        ).fetchall()
+        for row in rows:
+            con.execute(
+                """
+                UPDATE jobs
+                SET status='cancelled', activity='cancelled',
+                    caption='Interrupted — send the job again',
+                    error='The server restarted while this job was running.',
+                    updated_at=?
+                WHERE id=?
+                """,
+                (now, row["id"]),
+            )
+            if row["task_id"]:
+                con.execute(
+                    """
+                    UPDATE list_items
+                    SET status='assigned', job_id=NULL, updated_at=?
+                    WHERE id=?
+                    """,
+                    (now, row["task_id"]),
+                )
         con.commit()
         con.close()
 
@@ -359,16 +377,32 @@ def list_events(job_id: str) -> list[dict[str, Any]]:
 def add_artifact(
     job_id: str, agent_id: str, name: str, kind: str, path: str, mime: str | None = None
 ) -> dict[str, Any]:
-    art_id = str(uuid.uuid4())
+    now = utcnow()
     with _lock:
         con = connect()
-        con.execute(
-            """
-            INSERT INTO artifacts (id, job_id, agent_id, name, kind, path, mime, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (art_id, job_id, agent_id, name, kind, path, mime, utcnow()),
-        )
+        existing = con.execute(
+            "SELECT id FROM artifacts WHERE job_id=? AND name=?",
+            (job_id, name),
+        ).fetchone()
+        if existing:
+            art_id = existing["id"]
+            con.execute(
+                """
+                UPDATE artifacts
+                SET agent_id=?, kind=?, path=?, mime=?, created_at=?
+                WHERE id=?
+                """,
+                (agent_id, kind, path, mime, now, art_id),
+            )
+        else:
+            art_id = str(uuid.uuid4())
+            con.execute(
+                """
+                INSERT INTO artifacts (id, job_id, agent_id, name, kind, path, mime, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (art_id, job_id, agent_id, name, kind, path, mime, now),
+            )
         con.commit()
         con.close()
     return {
@@ -472,6 +506,61 @@ def remap_free_models() -> None:
         if model in zen.CHAT_MODELS:
             continue
         update_agent(agent["id"], {"model": catalog.default_model_id()})
+
+
+def claim_or_queue(agent_id: str, item_id: str, prompt: str) -> dict[str, Any]:
+    """Start a job, or park the item, in one transaction so a desk cannot double-book."""
+    job_id = str(uuid.uuid4())
+    now = utcnow()
+    with _lock:
+        con = connect()
+        con.execute("BEGIN IMMEDIATE")
+        busy = con.execute(
+            """
+            SELECT id FROM jobs
+            WHERE agent_id=? AND status IN ('queued', 'thinking', 'tool')
+            LIMIT 1
+            """,
+            (agent_id,),
+        ).fetchone()
+        if busy:
+            con.execute(
+                """
+                UPDATE list_items
+                SET status='assigned', agent_id=?, job_id=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (agent_id, now, item_id),
+            )
+            con.commit()
+            con.close()
+            return {"job": None, "queued": True, "item": get_item(item_id)}
+        con.execute(
+            """
+            INSERT INTO jobs (id, agent_id, prompt, status, activity, caption, output, created_at, updated_at, task_id)
+            VALUES (?, ?, ?, 'queued', 'idle', 'Queued on the floor', '', ?, ?, ?)
+            """,
+            (job_id, agent_id, prompt, now, now, item_id),
+        )
+        con.execute(
+            """
+            UPDATE list_items
+            SET status='working', agent_id=?, job_id=?, updated_at=?
+            WHERE id=?
+            """,
+            (agent_id, job_id, now, item_id),
+        )
+        con.commit()
+        con.close()
+    return {"job": get_job(job_id), "queued": False, "item": get_item(item_id)}
+
+
+def in_flight_jobs() -> list[dict[str, Any]]:
+    return [
+        job
+        for job in list_jobs()
+        if job.get("status") in {"queued", "thinking", "tool"}
+    ]
 
 
 def agent_busy(agent_id: str) -> bool:

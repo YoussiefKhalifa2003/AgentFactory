@@ -331,6 +331,7 @@ Frontend (optional, `apps/web/.env.local`):
 | `POST` | `/api/assign` | Hand a list item or text to a desk |
 | `GET` | `/api/meetings` | Optional Meeting Note Taker feed |
 | `POST` | `/api/jobs` | Direct job |
+| `POST` | `/api/jobs/{id}/cancel` | Stop a running job |
 | `GET` | `/api/jobs/{id}/site/{path}` | Inline website |
 | `GET` | `/api/artifacts/{id}/file` | Inline; `?download=1` to save |
 | `WS` | `/ws` | `job.token`, `job.activity`, `job.done`, `job.artifact` |
@@ -402,5 +403,7 @@ AgentFactory/
 ---
 
 ## Status
+
+Jobs fail closed when a test, a source, or a linked stylesheet or script is missing or cut off. View does not replace that script with a different game. A blocked desk keeps the answer it already wrote and shows the real reason. Stop ends a running job. A refresh keeps the live answer. The chosen model is tried first, then another configured provider.
 
 Personal-first. Every change from here is committed and pushed to this repository. Forge someone, put a list on their desk, hit View.
