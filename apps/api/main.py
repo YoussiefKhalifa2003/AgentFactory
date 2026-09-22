@@ -106,8 +106,16 @@ class JobIn(BaseModel):
     prompt: str
 
 
-class ListIn(BaseModel):
-    title: str
+class ListPatch(BaseModel):
+    project_id: str | None = None
+
+
+class ProjectIn(BaseModel):
+    name: str
+    organization: str
+    project: str
+    repository: str
+    branch: str = "main"
 
 
 class ItemIn(BaseModel):
@@ -173,6 +181,58 @@ async def meeting_actions(
     limit: int = 40,
 ) -> dict[str, Any]:
     return meetings.list_actions(mine=mine, meeting_id=meeting_id, limit=limit)
+
+
+@app.get("/api/projects")
+async def projects() -> list[dict[str, Any]]:
+    return db.list_projects()
+
+
+@app.post("/api/projects")
+async def add_project(body: ProjectIn) -> dict[str, Any]:
+    if not all(part.strip() for part in (body.name, body.organization, body.project, body.repository)):
+        raise HTTPException(400, "name, organization, project, and repository are required")
+    return db.create_project(body.model_dump())
+
+
+@app.delete("/api/projects/{project_id}")
+async def remove_project(project_id: str) -> dict[str, Any]:
+    if db.lists_using_project(project_id):
+        raise HTTPException(409, "a list still uses this project")
+    if not db.delete_project(project_id):
+        raise HTTPException(404, "project not found")
+    import shutil
+
+    import repos
+
+    shutil.rmtree(repos.cache_dir(project_id), ignore_errors=True)
+    return {"ok": True, "id": project_id}
+
+
+@app.post("/api/projects/{project_id}/sync")
+async def sync_project(project_id: str) -> dict[str, Any]:
+    import repos
+
+    try:
+        row = repos.sync(project_id)
+    except KeyError:
+        raise HTTPException(404, "project not found") from None
+    if not row:
+        raise HTTPException(404, "project not found")
+    return row
+
+
+@app.patch("/api/lists/{list_id}")
+async def patch_list(list_id: str, body: ListPatch) -> dict[str, Any]:
+    if not db.get_list(list_id):
+        raise HTTPException(404, "list not found")
+    if body.project_id and not db.get_project(body.project_id):
+        raise HTTPException(404, "project not found")
+    updated = db.update_list(list_id, project_id=body.project_id)
+    if not updated:
+        raise HTTPException(404, "list not found")
+    updated["project"] = db._public_project(updated.get("project_id"))
+    return updated
 
 
 @app.get("/api/lists")

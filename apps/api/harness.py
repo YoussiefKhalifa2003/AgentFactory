@@ -85,6 +85,45 @@ TOOLS = [
     },
 ]
 
+CONTEXT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "repo_search",
+            "description": "Search the linked project repository. Literal text, not a shell command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "repo_read",
+            "description": "Read one text file from the linked project repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall",
+            "description": "Search earlier finished work on this same project.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    },
+]
+
 TOOL_BLOCK = re.compile(r'<tool\s+name="([^"]+)">\s*(.*?)\s*</tool>', re.S | re.I)
 INNER_TAG = re.compile(r"<(\w+)>(.*?)</\1>", re.S)
 
@@ -158,9 +197,32 @@ Use fetch_url only for a normal page the user asked you to open.
 """
 
 
-def _system_prompt(agent: dict[str, Any]) -> str:
+def _system_prompt(agent: dict[str, Any], project: dict[str, Any] | None = None, job_id: str = "") -> str:
     strengths = agent.get("strengths") or []
     packs = "\n\n".join(db.skill_text(s) for s in strengths if db.skill_text(s))
+    project_block = ""
+    if project:
+        import memory
+        import repos
+
+        ready = repos.repo_root(project["id"]) is not None
+        cache = (
+            "Code cache: ready"
+            if ready
+            else f"Code cache: unavailable. {project.get('sync_error') or 'not synced'}"
+        )
+        tree = repos.tree_map(project["id"])
+        earlier = memory.preamble(project["id"], job_id)
+        project_block = f"""
+Project: {project['name']}
+Branch: {project.get('branch') or 'main'}
+{cache}
+{tree}
+
+Search this repository before describing this product. Do not invent files or behavior.
+"""
+        if earlier:
+            project_block += "\n" + earlier + "\n"
     return f"""You are {agent['name']}. You complete jobs.
 
 {agent.get('instructions') or ''}
@@ -172,6 +234,7 @@ The user message is the job. Produce the finished deliverable in the reply. Then
 {TEXT_PROTOCOL}
 
 {packs}
+{project_block}
 """
 
 
@@ -243,7 +306,9 @@ def _done_text(body: str, ws: Path) -> str:
     return text
 
 
-async def _call_tool(ws: Path, name: str, args: dict[str, Any]) -> str:
+async def _call_tool(
+    ws: Path, name: str, args: dict[str, Any], project_id: str | None = None
+) -> str:
     try:
         if name == "write_file":
             rel = sandbox.write_file(ws, args["path"], args.get("content", ""))
@@ -256,6 +321,18 @@ async def _call_tool(ws: Path, name: str, args: dict[str, Any]) -> str:
             return json.dumps({"files": sandbox.list_files(ws)})
         if name == "fetch_url":
             return await _fetch_url(str(args.get("url") or ""))
+        if name == "repo_search":
+            import repos
+
+            return repos.search(str(project_id or ""), str(args.get("query") or ""))
+        if name == "repo_read":
+            import repos
+
+            return repos.read_file(str(project_id or ""), str(args.get("path") or ""))
+        if name == "recall":
+            import memory
+
+            return memory.recall(str(project_id or ""), str(args.get("query") or ""))
         return json.dumps({"error": f"unknown tool {name}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -268,6 +345,9 @@ def _activity_for_tool(name: str) -> tuple[str, str]:
         "run_python": ("tool:sandbox", "Running Python at the desk"),
         "list_workspace": ("tool:sandbox", "Checking the workspace"),
         "fetch_url": ("tool:web", "Fetching a source"),
+        "repo_search": ("tool:repo", "Searching the repository"),
+        "repo_read": ("tool:repo", "Reading the repository"),
+        "recall": ("tool:memory", "Checking earlier work"),
     }.get(name, ("thinking", name))
 
 
@@ -479,6 +559,12 @@ async def _run_named_tool(
     if name == "write_file":
         body = str(event_args.get("content") or "")
         event_args = {"path": event_args.get("path") or "file", "bytes": len(body.encode("utf-8"))}
+    elif name in {"repo_read", "repo_search", "recall"}:
+        event_args = {
+            "path": event_args.get("path"),
+            "query": event_args.get("query"),
+            "bytes": len(str(event_args.get("query") or event_args.get("path") or "")),
+        }
     db.add_event(job["id"], "tool", {"name": name, "args": event_args})
     broadcast(
         {
@@ -490,7 +576,7 @@ async def _run_named_tool(
             "tool": name,
         }
     )
-    result = await _call_tool(ws, name, args or {})
+    result = await _call_tool(ws, name, args or {}, str(job.get("project_id") or ""))
     if name == "write_file":
         path = str(args.get("path") or "file")
         _stream_text(
@@ -723,6 +809,7 @@ async def _complete_with_failover(
     on_token: Callable[[str], None] | None = None,
     on_think: Callable[[str], None] | None = None,
     with_tools: bool = True,
+    tool_defs: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     import catalog
 
@@ -738,10 +825,11 @@ async def _complete_with_failover(
             }
         )
 
+    payload = tool_defs if tool_defs is not None else (TOOLS if with_tools else None)
     return await catalog.complete_with_failover(
         models[0] if models else "",
         messages,
-        TOOLS if with_tools else None,
+        payload,
         on_caption=caption,
         on_token=on_token,
         on_think=on_think,
@@ -939,6 +1027,14 @@ def _block_job(
         }
     )
     _touch_task(job_id, "blocked", broadcast)
+    if kept.strip():
+        import memory
+
+        current = db.get_job(job_id) or job
+        current["status"] = "blocked"
+        current["output"] = kept
+        files = [row["name"] for row in db.list_artifacts(job_id)]
+        memory.remember_job(current, agent, kept, files)
     _kick_next(agent["id"], broadcast)
 
 
@@ -1012,6 +1108,17 @@ async def _finish(
         error=None,
         model=used_model,
     )
+    import memory
+
+    done_job = db.get_job(job_id) or job
+    done_job["status"] = "done"
+    done_job["output"] = output
+    memory.remember_job(
+        done_job,
+        agent,
+        output,
+        [row["name"] for row in db.list_artifacts(job_id)],
+    )
     broadcast(
         {
             "type": "job.done",
@@ -1077,8 +1184,9 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                 await _finish(job_id, agent, ws, broadcast, done, "local", prompt)
                 return
 
+        project = db.get_project(str(job["project_id"])) if job.get("project_id") else None
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _system_prompt(agent)},
+            {"role": "system", "content": _system_prompt(agent, project, job_id)},
             {"role": "user", "content": prompt},
         ]
         used_model = agent.get("model") or ""
@@ -1093,6 +1201,15 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
 
         try:
             allow_tools = _use_tools(agent, prompt)
+
+            def job_tools(allow_sandbox: bool) -> list[dict[str, Any]] | None:
+                chosen: list[dict[str, Any]] = []
+                if allow_sandbox:
+                    chosen.extend(TOOLS)
+                if project:
+                    chosen.extend(CONTEXT_TOOLS)
+                return chosen or None
+
             for _round_i in range(5):
                 data, used_model = await _complete_with_failover(
                     messages,
@@ -1102,7 +1219,8 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                     agent["id"],
                     on_token=on_token,
                     on_think=on_think,
-                    with_tools=allow_tools,
+                    with_tools=False,
+                    tool_defs=job_tools(allow_tools),
                 )
                 choice = (data.get("choices") or [{}])[0]
                 msg = _message_from_choice(choice)

@@ -470,6 +470,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     jobs,
     selectedId,
     live,
+    openListId,
     stageOpen,
     assignWork,
     toggleStage,
@@ -550,7 +551,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     if (!prompt.trim()) return;
     const text = prompt.trim();
     setHandError(null);
-    assignWork({ agentId: agent.id, text, listId: "inbox" })
+    assignWork({ agentId: agent.id, text, listId: openListId || "inbox" })
       .then(() => setPrompt(""))
       .catch((err) => setHandError(err instanceof Error ? err.message : "Could not assign"));
   }
@@ -826,6 +827,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                         : "On the desk"}
               </p>
               <p className="text-sm font-medium">{clip(taskTitle({ prompt: item.prompt }), 240)}</p>
+              {item.project_name && (
+                <p className="text-[11px] text-[var(--ink-soft)]">{item.project_name}</p>
+              )}
               {(reply || active) && (
                 <div className="text-sm">
                   {reply ? (
@@ -877,7 +881,11 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                   type="button"
                   className="btn px-3 py-1 text-xs"
                   onClick={() => {
-                    assignWork({ agentId: agent.id, text: item.prompt, listId: "inbox" }).catch((err) =>
+                    assignWork({
+                      agentId: agent.id,
+                      text: item.prompt,
+                      listId: openListId || "inbox",
+                    }).catch((err) =>
                       setHandError(err instanceof Error ? err.message : "Could not assign")
                     );
                   }}

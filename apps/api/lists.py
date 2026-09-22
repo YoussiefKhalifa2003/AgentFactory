@@ -18,12 +18,28 @@ def pick_best_agent(suggested: str) -> dict[str, Any] | None:
     return agents[0]
 
 
-def item_prompt(list_title: str, text: str) -> str:
+def item_prompt(list_title: str, text: str, project_name: str | None = None) -> str:
+    line = f"\nThis task is on the {project_name} project." if project_name else ""
     return (
         f'Complete this task from the list "{list_title}".\n'
-        f"Task: {text}\n\n"
+        f"Task: {text}\n"
+        f"{line}\n"
         "Produce the finished deliverable in your reply."
     )
+
+
+def _project_prompt(item: dict[str, Any]) -> tuple[str, str | None]:
+    prompt = item["prompt"]
+    project_id = db.project_for_list(item["list_id"])
+    if not project_id:
+        return prompt, None
+    project = db.get_project(project_id)
+    if not project:
+        return prompt, None
+    marker = f"This task is on the {project['name']} project."
+    if marker not in prompt:
+        prompt = prompt.rstrip() + "\n" + marker
+    return prompt, project_id
 
 
 def sync_meetings() -> None:
@@ -90,6 +106,7 @@ def get_list_payload(list_id: str) -> dict[str, Any] | None:
         return None
     items = db.list_items(list_id)
     row.update(db._list_counts(list_id))
+    row["project"] = db._public_project(row.get("project_id"))
     return {**row, "items": items}
 
 
@@ -101,11 +118,13 @@ def add_item(list_id: str, text: str) -> dict[str, Any]:
     if not body:
         raise ValueError("text required")
     suggested = meetings._suggest_strength(body)
+    project_id = db.project_for_list(list_id)
+    project = db.get_project(project_id) if project_id else None
     return db.create_item(
         {
             "list_id": list_id,
             "text": body,
-            "prompt": item_prompt(lst["title"], body),
+            "prompt": item_prompt(lst["title"], body, (project or {}).get("name")),
             "suggested": suggested,
             "mine": True,
         }
@@ -121,7 +140,8 @@ def start_next(agent_id: str) -> dict[str, Any] | None:
     agent = db.get_agent(agent_id)
     if not agent:
         return None
-    claimed = db.claim_or_queue(agent_id, item["id"], item["prompt"])
+    prompt, project_id = _project_prompt(item)
+    claimed = db.claim_or_queue(agent_id, item["id"], prompt, project_id)
     return {
         "item": claimed.get("item"),
         "job": claimed.get("job"),
@@ -158,7 +178,8 @@ def assign(
     if not agent:
         raise LookupError("no agent")
 
-    claimed = db.claim_or_queue(agent["id"], item["id"], item["prompt"])
+    prompt, project_id = _project_prompt(item)
+    claimed = db.claim_or_queue(agent["id"], item["id"], prompt, project_id)
     return {
         "item": claimed.get("item") or item,
         "job": claimed.get("job"),

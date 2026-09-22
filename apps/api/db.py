@@ -114,10 +114,35 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(list_id) REFERENCES lists(id)
             );
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                organization TEXT NOT NULL,
+                project TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                synced_at TEXT,
+                sync_error TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                task TEXT NOT NULL,
+                status TEXT NOT NULL,
+                body TEXT NOT NULL,
+                files TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL
+            );
             """
         )
         _ensure_column(con, "jobs", "task_id", "TEXT")
         _ensure_column(con, "jobs", "model", "TEXT")
+        _ensure_column(con, "jobs", "project_id", "TEXT")
+        _ensure_column(con, "lists", "project_id", "TEXT")
         con.commit()
         con.close()
     seed_starters()
@@ -305,6 +330,8 @@ def list_jobs(agent_id: str | None = None) -> list[dict[str, Any]]:
     con.close()
     for job in jobs:
         job["artifacts"] = arts.get(job["id"], [])
+        linked = _public_project(job.get("project_id"))
+        job["project_name"] = linked["name"] if linked else None
     return jobs
 
 
@@ -508,7 +535,9 @@ def remap_free_models() -> None:
         update_agent(agent["id"], {"model": catalog.default_model_id()})
 
 
-def claim_or_queue(agent_id: str, item_id: str, prompt: str) -> dict[str, Any]:
+def claim_or_queue(
+    agent_id: str, item_id: str, prompt: str, project_id: str | None = None
+) -> dict[str, Any]:
     """Start a job, or park the item, in one transaction so a desk cannot double-book."""
     job_id = str(uuid.uuid4())
     now = utcnow()
@@ -537,10 +566,13 @@ def claim_or_queue(agent_id: str, item_id: str, prompt: str) -> dict[str, Any]:
             return {"job": None, "queued": True, "item": get_item(item_id)}
         con.execute(
             """
-            INSERT INTO jobs (id, agent_id, prompt, status, activity, caption, output, created_at, updated_at, task_id)
-            VALUES (?, ?, ?, 'queued', 'idle', 'Queued on the floor', '', ?, ?, ?)
+            INSERT INTO jobs (
+                id, agent_id, prompt, status, activity, caption, output,
+                created_at, updated_at, task_id, project_id
+            )
+            VALUES (?, ?, ?, 'queued', 'idle', 'Queued on the floor', '', ?, ?, ?, ?)
             """,
-            (job_id, agent_id, prompt, now, now, item_id),
+            (job_id, agent_id, prompt, now, now, item_id, project_id),
         )
         con.execute(
             """
@@ -604,6 +636,7 @@ def list_lists() -> list[dict[str, Any]]:
     for row in rows:
         item = dict(row)
         item.update(_list_counts(item["id"]))
+        item["project"] = _public_project(item.get("project_id"))
         out.append(item)
     return out
 
@@ -816,3 +849,175 @@ def next_queued_item(agent_id: str) -> dict[str, Any] | None:
     ).fetchone()
     con.close()
     return _item_row(row)
+
+
+def _public_project(project_id: str | None) -> dict[str, Any] | None:
+    if not project_id:
+        return None
+    row = get_project(project_id)
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "branch": row["branch"],
+        "synced_at": row.get("synced_at"),
+        "sync_error": row.get("sync_error"),
+    }
+
+
+def create_project(payload: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(uuid.uuid4())
+    now = utcnow()
+    branch = (payload.get("branch") or "main").strip() or "main"
+    with _lock:
+        con = connect()
+        con.execute(
+            """
+            INSERT INTO projects (
+                id, name, organization, project, repository, branch, synced_at, sync_error, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            """,
+            (
+                project_id,
+                payload["name"].strip(),
+                payload["organization"].strip(),
+                payload["project"].strip(),
+                payload["repository"].strip(),
+                branch,
+                now,
+            ),
+        )
+        con.commit()
+        con.close()
+    row = get_project(project_id)
+    assert row
+    return row
+
+
+def get_project(project_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def list_projects() -> list[dict[str, Any]]:
+    con = connect()
+    rows = con.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def update_project(project_id: str, **fields: Any) -> dict[str, Any] | None:
+    if not fields:
+        return get_project(project_id)
+    if not get_project(project_id):
+        return None
+    keys = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [project_id]
+    with _lock:
+        con = connect()
+        con.execute(f"UPDATE projects SET {keys} WHERE id=?", vals)
+        con.commit()
+        con.close()
+    return get_project(project_id)
+
+
+def lists_using_project(project_id: str) -> int:
+    con = connect()
+    row = con.execute("SELECT COUNT(*) FROM lists WHERE project_id=?", (project_id,)).fetchone()
+    con.close()
+    return int(row[0] if row else 0)
+
+
+def delete_project(project_id: str) -> bool:
+    if not get_project(project_id) or lists_using_project(project_id):
+        return False
+    with _lock:
+        con = connect()
+        con.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        con.commit()
+        con.close()
+    return True
+
+
+def project_for_list(list_id: str) -> str | None:
+    row = get_list(list_id)
+    if not row:
+        return None
+    value = row.get("project_id")
+    return str(value) if value else None
+
+
+def remember(
+    *,
+    project_id: str,
+    job_id: str,
+    agent_id: str,
+    agent_name: str,
+    task: str,
+    status: str,
+    body: str,
+    files: list[str],
+) -> None:
+    now = utcnow()
+    with _lock:
+        con = connect()
+        con.execute("DELETE FROM memories WHERE job_id=?", (job_id,))
+        con.execute(
+            """
+            INSERT INTO memories (
+                id, project_id, job_id, agent_id, agent_name, task, status, body, files, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                project_id,
+                job_id,
+                agent_id,
+                agent_name,
+                task[:500],
+                status,
+                body[:2500],
+                json.dumps(files),
+                now,
+            ),
+        )
+        con.commit()
+        con.close()
+
+
+def list_memories(project_id: str, limit: int = 8) -> list[dict[str, Any]]:
+    con = connect()
+    rows = con.execute(
+        """
+        SELECT * FROM memories WHERE project_id=?
+        ORDER BY created_at DESC LIMIT ?
+        """,
+        (project_id, limit),
+    ).fetchall()
+    con.close()
+    out = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["files"] = json.loads(item.get("files") or "[]")
+        except json.JSONDecodeError:
+            item["files"] = []
+        out.append(item)
+    return out
+
+
+def search_memories(project_id: str, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    needle = (query or "").strip().lower()
+    if not needle:
+        return []
+    hits = []
+    for row in list_memories(project_id, limit=40):
+        blob = f"{row.get('task') or ''}\n{row.get('body') or ''}".lower()
+        if needle in blob:
+            hits.append(row)
+        if len(hits) >= limit:
+            break
+    return hits

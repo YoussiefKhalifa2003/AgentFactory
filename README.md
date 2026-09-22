@@ -128,6 +128,14 @@ A writing desk drafts in the thread. A writing desk **with PDF** produces a pack
 
 Discovery: any `skills/<name>/SKILL.md` with YAML `kind: tool` appears in the Tools list automatically.
 
+## Linked repositories
+
+A list, including a meeting list, can be linked to an Azure DevOps repository. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code read). On that list, choose **Link a repo**, then **Refresh code**. The checkout stays on this machine under `.run/repos` and is read-only.
+
+Every desk that receives a task from that list can search and read those files. Planning and writing desks get that access too. They still do not get the sandbox write tools.
+
+Finished work on that project is remembered. The next desk on the same project sees who did the earlier job and what they wrote. A different project does not. The token is never stored in the database or the prompt.
+
 ---
 
 ## How a job runs
@@ -306,6 +314,7 @@ Two PowerShell windows: API on **8000**, UI on **3000**.
 | `OLLAMA_BASE_URL` | Default `http://127.0.0.1:11434` |
 | `MEETING_NOTES_DB_PATH` | Optional Meeting Note Taker SQLite |
 | `MEETING_ME_ALIASES` | Names treated as “mine” on meeting actions |
+| `AZURE_DEVOPS_PAT` | Read code from a linked Azure DevOps repository |
 | `HOST` / `PORT` | API bind (default `127.0.0.1:8000`) |
 
 Frontend (optional, `apps/web/.env.local`):
@@ -328,6 +337,9 @@ Frontend (optional, `apps/web/.env.local`):
 | `PATCH`/`DELETE` | `/api/agents/{id}` | Desk settings / remove |
 | `POST` | `/api/agents/{id}/pfp` | Portrait upload |
 | `GET`/`POST` | `/api/lists` | Stored to-do lists |
+| `PATCH` | `/api/lists/{id}` | Link or unlink a project |
+| `GET`/`POST` | `/api/projects` | Azure DevOps repo links |
+| `POST` | `/api/projects/{id}/sync` | Refresh the local code cache |
 | `POST` | `/api/assign` | Hand a list item or text to a desk |
 | `GET` | `/api/meetings` | Optional Meeting Note Taker feed |
 | `POST` | `/api/jobs` | Direct job |

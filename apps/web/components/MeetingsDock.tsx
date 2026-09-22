@@ -10,7 +10,7 @@ export function ListsSidebar({
 }: {
   onDragStrength: (strength: Strength | null) => void;
 }) {
-  const { agents, assignWork, select, taskTick } = useFactory();
+  const { agents, assignWork, select, taskTick, setOpenListId } = useFactory();
   const [lists, setLists] = useState<TaskList[]>([]);
   const [openId, setOpenId] = useState<string>("inbox");
   const [items, setItems] = useState<ListItem[]>([]);
@@ -23,6 +23,15 @@ export function ListsSidebar({
   const [picked, setPicked] = useState<string[]>([]);
   const [removing, setRemoving] = useState(false);
   const [query, setQuery] = useState("");
+  const [linking, setLinking] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [linkForm, setLinkForm] = useState({
+    name: "",
+    organization: "",
+    project: "",
+    repository: "",
+    branch: "main",
+  });
 
   const openList = lists.find((l) => l.id === openId) || null;
   const isMeeting = openList?.kind === "meeting";
@@ -66,6 +75,10 @@ export function ListsSidebar({
   }, [openId]);
 
   useEffect(() => {
+    setOpenListId(openId || "inbox");
+  }, [openId, setOpenListId]);
+
+  useEffect(() => {
     loadItems(openId);
   }, [openId, taskTick]);
 
@@ -102,6 +115,54 @@ export function ListsSidebar({
       await loadLists();
     } finally {
       setRemoving(false);
+    }
+  }
+
+  async function saveLink(e: FormEvent) {
+    e.preventDefault();
+    if (!openId) return;
+    const created = await fetch(`${API_URL}/api/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(linkForm),
+    });
+    if (!created.ok) {
+      setError("Could not save that repository.");
+      return;
+    }
+    const project = await created.json();
+    const patched = await fetch(`${API_URL}/api/lists/${openId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: project.id }),
+    });
+    if (!patched.ok) {
+      setError("Could not link that list.");
+      return;
+    }
+    setLinking(false);
+    await loadLists();
+  }
+
+  async function unlinkProject() {
+    if (!openId) return;
+    await fetch(`${API_URL}/api/lists/${openId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: null }),
+    });
+    await loadLists();
+  }
+
+  async function refreshCode() {
+    const projectId = openList?.project?.id;
+    if (!projectId || syncing) return;
+    setSyncing(true);
+    try {
+      await fetch(`${API_URL}/api/projects/${projectId}/sync`, { method: "POST" });
+      await loadLists();
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -223,7 +284,59 @@ export function ListsSidebar({
               {picking ? `${picked.length} selected` : openList?.title || "Tasks"}
             </h2>
           </div>
-          {picking ? (
+          <div className="flex shrink-0 items-center gap-2">
+            {openList?.project ? (
+              <>
+                <span className="max-w-[88px] truncate text-[11px] text-[var(--ink-soft)]">
+                  {openList.project.name}
+                </span>
+                <button type="button" className="btn px-2 py-1 text-[11px]" disabled={syncing} onClick={refreshCode}>
+                  {syncing ? "Refreshing…" : "Refresh code"}
+                </button>
+                <button type="button" className="text-[11px] text-[var(--ink-soft)]" onClick={unlinkProject}>
+                  Unlink
+                </button>
+              </>
+            ) : (
+              <button type="button" className="text-[11px] text-[var(--ink-soft)]" onClick={() => setLinking(true)}>
+                Link a repo
+              </button>
+            )}
+          </div>
+        </div>
+        {openList?.project?.sync_error && (
+          <p className="px-5 pb-2 text-xs text-[#b42318]">{openList.project.sync_error}</p>
+        )}
+        {linking && (
+          <form onSubmit={saveLink} className="grid shrink-0 gap-2 px-4 pb-3">
+            {(
+              [
+                ["name", "Name"],
+                ["organization", "Organization"],
+                ["project", "Project"],
+                ["repository", "Repository"],
+                ["branch", "Branch"],
+              ] as const
+            ).map(([key, label]) => (
+              <input
+                key={key}
+                value={linkForm[key]}
+                placeholder={key === "branch" ? "main" : label}
+                onChange={(e) => setLinkForm((cur) => ({ ...cur, [key]: e.target.value }))}
+                className="w-full rounded-full bg-white px-4 py-2 text-sm outline-none"
+              />
+            ))}
+            <div className="flex gap-2">
+              <button type="submit" className="btn px-3 py-1 text-xs">
+                Save
+              </button>
+              <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setLinking(false)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+        {picking ? (
             <button
               type="button"
               className="btn shrink-0 px-3 py-1 text-xs"
@@ -252,7 +365,6 @@ export function ListsSidebar({
               </div>
             )
           )}
-        </div>
         <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
           <input
             value={query}

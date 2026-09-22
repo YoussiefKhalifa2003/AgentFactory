@@ -82,6 +82,8 @@ export type Job = {
   output: string;
   error: string | null;
   task_id?: string | null;
+  project_id?: string | null;
+  project_name?: string | null;
   created_at?: string;
   updated_at?: string;
   artifacts?: Artifact[];
@@ -124,6 +126,14 @@ export type TaskList = {
   title: string;
   kind: "inbox" | "custom" | "meeting" | string;
   source?: string | null;
+  project_id?: string | null;
+  project?: {
+    id: string;
+    name: string;
+    branch: string;
+    synced_at?: string | null;
+    sync_error?: string | null;
+  } | null;
   sort_at?: string;
   item_count: number;
   open_count: number;

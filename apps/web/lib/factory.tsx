@@ -35,6 +35,8 @@ type FactoryContextValue = {
   booted: boolean;
   offline: boolean;
   taskTick: number;
+  openListId: string;
+  setOpenListId: (id: string) => void;
   select: (id: string | null) => void;
   openStage: (id: string) => void;
   closeStage: () => void;
@@ -63,6 +65,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   const [booted, setBooted] = useState(false);
   const [offline, setOffline] = useState(false);
   const [taskTick, setTaskTick] = useState(0);
+  const [openListId, setOpenListId] = useState("inbox");
   const wsRef = useRef<WebSocket | null>(null);
 
   const refresh = useCallback(async () => {
@@ -423,6 +426,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       booted,
       offline,
       taskTick,
+      openListId,
+      setOpenListId,
       select: setSelectedId,
       openStage: (id: string) => {
         setSelectedId(id);
@@ -452,6 +457,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       booted,
       offline,
       taskTick,
+      openListId,
       submitJob,
       assignWork,
       deleteAgent,
