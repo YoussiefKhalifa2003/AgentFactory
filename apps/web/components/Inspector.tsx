@@ -144,12 +144,6 @@ function fileKindLabel(file: Artifact) {
   return file.name;
 }
 
-function downloadLabel(file: Artifact) {
-  const kind = fileKindLabel(file);
-  if (kind === file.name) return `Download ${file.name}`;
-  return `Download ${kind}`;
-}
-
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -611,12 +605,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                   key={s.id}
                   type="button"
                   onClick={() => toggleStrength(s.id)}
-                  className="rounded-full px-3 py-1 text-xs"
+                  className={`rounded-full px-2 py-1 text-xs ${on ? "" : "text-[var(--ink-soft)]"}`}
                   style={{
-                    background: on
-                      ? `color-mix(in srgb, ${agent.pigment} 22%, white)`
-                      : "rgba(255,255,255,0.7)",
-                    outline: on ? `1px solid ${agent.pigment}` : undefined,
+                    background: on ? `color-mix(in srgb, ${agent.pigment} 18%, white)` : "transparent",
                   }}
                 >
                   {s.label}
@@ -636,12 +627,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                     key={s.id}
                     type="button"
                     onClick={() => toggleTool(s.id)}
-                    className="rounded-full px-3 py-1 text-xs"
+                    className={`rounded-full px-2 py-1 text-xs ${on ? "" : "text-[var(--ink-soft)]"}`}
                     style={{
-                      background: on
-                        ? `color-mix(in srgb, ${agent.pigment} 22%, white)`
-                        : "rgba(255,255,255,0.7)",
-                      outline: on ? `1px solid ${agent.pigment}` : undefined,
+                      background: on ? `color-mix(in srgb, ${agent.pigment} 18%, white)` : "transparent",
                     }}
                   >
                     {s.label}
@@ -666,7 +654,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         <button
           type="button"
           onClick={() => toggleStage(agent.id)}
-          className="btn btn-pigment flex-1"
+          className="btn btn-pigment"
           style={{ background: agent.pigment }}
         >
           {stageOpen ? "Hide live floor" : "Live floor"}
@@ -847,32 +835,30 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                 </div>
               )}
               {files.length > 0 && (
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   {viewFile && (
                     <button
                       type="button"
-                      className="btn btn-solid"
+                      className="btn btn-solid px-3 py-1 text-xs"
                       onClick={() => setPreview({ jobId: item.id, file: viewFile })}
                     >
                       View
                     </button>
                   )}
+                  {viewFile && (
+                    <a className="text-[11px] text-[var(--ink-soft)] underline" href={downloadSrc(viewFile)}>
+                      Download
+                    </a>
+                  )}
                   {extraViews.map((a) => (
                     <button
                       key={a.id}
                       type="button"
-                      className="btn"
+                      className="text-[11px] text-[var(--ink-soft)] underline"
                       onClick={() => setPreview({ jobId: item.id, file: a })}
                     >
-                      View {fileKindLabel(a)}
+                      {fileKindLabel(a)}
                     </button>
-                  ))}
-                  {files
-                    .filter((a) => !(pdfFile && /\.md$/i.test(a.name)))
-                    .map((a) => (
-                    <a key={a.id} className="btn" href={downloadSrc(a)}>
-                      {downloadLabel(a)}
-                    </a>
                   ))}
                 </div>
               )}

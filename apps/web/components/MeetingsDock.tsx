@@ -48,6 +48,7 @@ export function ListsSidebar({
   const [newTitle, setNewTitle] = useState("");
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
   const [meetingsFound, setMeetingsFound] = useState<boolean | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const [removing, setRemoving] = useState(false);
@@ -156,7 +157,7 @@ export function ListsSidebar({
     const projectName = (manual ? linkForm.project : parsed?.project || "").trim();
     const repository = (manual ? linkForm.repository : parsed?.repository || "").trim();
     if (!organization || !projectName || !repository) {
-      setError("Paste the repository link from Azure DevOps, or fill in the three names.");
+      setLinkError("Paste the repository link from Azure DevOps, or fill in the three names.");
       setManual(true);
       return;
     }
@@ -172,7 +173,7 @@ export function ListsSidebar({
       }),
     });
     if (!created.ok) {
-      setError("Could not save that repository.");
+      setLinkError("Could not save that repository.");
       return;
     }
     const project = await created.json();
@@ -182,11 +183,11 @@ export function ListsSidebar({
       body: JSON.stringify({ project_id: project.id }),
     });
     if (!patched.ok) {
-      setError("Could not link that list.");
+      setLinkError("Could not link that list.");
       return;
     }
     setLinking(false);
-    setError(null);
+    setLinkError(null);
     setRepoUrl("");
     await loadLists();
   }
@@ -395,6 +396,7 @@ export function ListsSidebar({
         {linking && !openList?.project && (
           <form onSubmit={saveLink} className="mx-4 mb-3 shrink-0 rounded-2xl bg-white px-3 py-3">
             <p className="text-sm">Paste the repository link</p>
+            {linkError && <p className="mt-1 text-xs text-[#b42318]">{linkError}</p>}
             <p className="mt-1 text-[11px] leading-4 text-[var(--ink-soft)]">
               In Azure DevOps, open the repo and copy the address bar. It looks like
               dev.azure.com/your-company/Stormcast/_git/Stormcast
@@ -533,7 +535,7 @@ export function ListsSidebar({
                   {(item.status === "open" || item.status === "blocked") && (
                     <button
                       type="button"
-                      className="btn px-2 py-1 text-[11px]"
+                      className="text-[11px] text-[var(--ink-soft)] underline"
                       onClick={(e) => {
                         e.stopPropagation();
                         onItemClick(item);

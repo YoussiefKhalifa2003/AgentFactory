@@ -2,6 +2,7 @@
 
 import { DragEvent, useEffect, useState } from "react";
 import { Agent, API_URL, badgeDataUrl, pfpSrc, strengthLabel } from "@/lib/types";
+import { splitPacks } from "@/lib/skills";
 import { useFactory } from "@/lib/factory";
 import { parseTaskDrag } from "@/lib/tasks";
 
@@ -93,8 +94,8 @@ export function Bay({
           </p>
         </div>
       </div>
-      <div className="relative z-[1] mt-5 flex flex-wrap gap-2">
-        {agent.strengths.map((s) => (
+      <div className="relative z-[1] mt-4 flex flex-wrap gap-2">
+        {splitPacks(agent.strengths).domain.map((s) => (
           <span
             key={s}
             className="rounded-full px-3 py-1 text-xs"
