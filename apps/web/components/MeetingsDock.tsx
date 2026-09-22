@@ -298,6 +298,11 @@ export function ListsSidebar({
             open={openId === list.id}
             onOpen={() => setOpenId(list.id)}
             onDelete={list.kind === "custom" ? () => removeList(list) : undefined}
+            onCode={
+              openId === list.id && !list.project
+                ? () => setLinking((open) => !open)
+                : undefined
+            }
           />
         ))}
         {meetings.length > 0 && (
@@ -314,82 +319,73 @@ export function ListsSidebar({
             list={list}
             open={openId === list.id}
             onOpen={() => setOpenId(list.id)}
+            onCode={
+              openId === list.id && !list.project
+                ? () => setLinking((open) => !open)
+                : undefined
+            }
           />
         ))}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--line)]">
-        <div className="shrink-0 px-5 pb-2 pt-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              {visible.length > 0 && (
+        {(picking || isMeeting || openList?.project) && (
+        <div className="flex shrink-0 items-center justify-between gap-2 px-4 py-2">
+          {picking ? (
+            <>
+              <div className="flex min-w-0 items-center gap-2">
                 <SelectCircle
                   checked={allPicked}
                   label={allPicked ? "Clear selection" : "Select all tasks"}
                   onToggle={toggleAllVisible}
                 />
-              )}
-              <h2 className="min-w-0 truncate text-sm font-semibold tracking-tight">
-                {picking ? `${picked.length} selected` : openList?.title || "Tasks"}
-              </h2>
-            </div>
-            {picking ? (
-              <button
-                type="button"
-                className="btn shrink-0 px-3 py-1 text-xs"
-                disabled={removing}
-                onClick={removePicked}
-              >
+                <p className="text-sm">{picked.length} selected</p>
+              </div>
+              <button type="button" className="text-xs text-[var(--ink-soft)] underline" disabled={removing} onClick={removePicked}>
                 Delete
               </button>
-            ) : (
-              isMeeting && (
-                <div className="flex rounded-full bg-[var(--paper-deep)] p-0.5 text-xs">
-                  <button
-                    type="button"
-                    className={`rounded-full px-2.5 py-1 ${mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
-                    onClick={() => setMine(true)}
-                  >
-                    Mine
-                  </button>
-                  <button
-                    type="button"
-                    className={`rounded-full px-2.5 py-1 ${!mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
-                    onClick={() => setMine(false)}
-                  >
-                    All
-                  </button>
-                </div>
-              )
-            )}
-          </div>
-          {!picking && openList && (
-            <div className="mt-1 pl-6">
-              {openList.project ? (
-                <p className="flex items-center gap-2 text-[11px] text-[var(--ink-soft)]">
-                  <span className="min-w-0 truncate">
-                    Code from {openList.project.name}
-                    {openList.project.branch ? ` · ${openList.project.branch}` : ""}
-                  </span>
-                  <button type="button" className="shrink-0 underline" disabled={syncing} onClick={refreshCode}>
-                    {syncing ? "Refreshing…" : "Refresh"}
-                  </button>
-                  <button type="button" className="shrink-0 underline" onClick={unlinkProject}>
-                    Remove
-                  </button>
-                </p>
-              ) : (
-                <button
-                  type="button"
-                  className="text-[11px] text-[var(--ink-soft)] underline"
-                  onClick={() => setLinking((open) => !open)}
-                >
-                  Connect the code for this list
-                </button>
-              )}
-            </div>
+            </>
+          ) : (
+            <>
+              <p className="min-w-0 truncate text-[11px] text-[var(--ink-soft)]">
+                {openList?.project
+                  ? `${openList.project.name}${openList.project.branch ? ` · ${openList.project.branch}` : ""}`
+                  : ""}
+              </p>
+              <div className="flex shrink-0 items-center gap-3">
+                {openList?.project && (
+                  <>
+                    <button type="button" className="text-[11px] text-[var(--ink-soft)] underline" disabled={syncing} onClick={refreshCode}>
+                      {syncing ? "Refreshing…" : "Refresh"}
+                    </button>
+                    <button type="button" className="text-[11px] text-[var(--ink-soft)] underline" onClick={unlinkProject}>
+                      Remove
+                    </button>
+                  </>
+                )}
+                {isMeeting && (
+                  <div className="flex rounded-full bg-[var(--paper-deep)] p-0.5 text-xs">
+                    <button
+                      type="button"
+                      className={`rounded-full px-2.5 py-1 ${mine ? "bg-white" : "text-[var(--ink-soft)]"}`}
+                      onClick={() => setMine(true)}
+                    >
+                      Mine
+                    </button>
+                    <button
+                      type="button"
+                      className={`rounded-full px-2.5 py-1 ${!mine ? "bg-white" : "text-[var(--ink-soft)]"}`}
+                      onClick={() => setMine(false)}
+                    >
+                      All
+                    </button>
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
+        )}
         {openList?.project?.sync_error && (
           <p className="px-5 pb-2 pl-11 text-xs text-[#b42318]">{openList.project.sync_error}</p>
         )}
@@ -461,15 +457,17 @@ export function ListsSidebar({
           </form>
         )}
         <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search this list"
-            className="mb-2 w-full rounded-full bg-white px-4 py-2 text-sm outline-none"
-          />
+          {items.length > 4 && (
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search"
+              className="mb-2 w-full bg-transparent px-2 py-1 text-sm outline-none"
+            />
+          )}
           {visible.length === 0 && (
-            <p className="px-2 py-6 text-center text-sm text-[var(--ink-soft)]">
-              {openList ? "This list is empty." : "Select a list."}
+            <p className="px-2 py-8 text-center text-sm text-[var(--ink-soft)]">
+              {query ? "No matches." : "Nothing here yet."}
             </p>
           )}
           {visible.map((item) => {
@@ -567,11 +565,13 @@ function ListRow({
   open,
   onOpen,
   onDelete,
+  onCode,
 }: {
   list: TaskList;
   open: boolean;
   onOpen: () => void;
   onDelete?: () => void;
+  onCode?: () => void;
 }) {
   const count = list.open_count + list.working_count;
   return (
@@ -584,7 +584,12 @@ function ListRow({
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 px-2 py-2.5 text-left">
         <span className="block truncate text-sm font-medium">{list.title}</span>
       </button>
-      <span className="shrink-0 pr-1 text-xs text-[var(--ink-soft)]">{count}</span>
+      {onCode && (
+        <button type="button" className="shrink-0 text-[11px] text-[var(--ink-soft)]" onClick={onCode}>
+          Code
+        </button>
+      )}
+      <span className="shrink-0 pr-1 text-xs text-[var(--ink-soft)]">{count || ""}</span>
       {onDelete && (
         <button
           type="button"
