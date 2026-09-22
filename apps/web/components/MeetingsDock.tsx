@@ -5,6 +5,35 @@ import { API_URL, ListItem, Strength, TaskList, strengthLabel } from "@/lib/type
 import { pickBestAgent, TASK_MIME, taskDragPayload } from "@/lib/tasks";
 import { useFactory } from "@/lib/factory";
 
+function readRepoLink(raw: string) {
+  const text = raw.trim();
+  if (!text) return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  const parts = url.pathname.split("/").filter(Boolean);
+  const gitAt = parts.findIndex((part) => part.toLowerCase() === "_git");
+  if (host === "dev.azure.com" && gitAt >= 2 && parts[gitAt + 1]) {
+    return {
+      organization: decodeURIComponent(parts[0]),
+      project: decodeURIComponent(parts[1]),
+      repository: decodeURIComponent(parts[gitAt + 1]),
+    };
+  }
+  if (host.endsWith(".visualstudio.com") && gitAt >= 1 && parts[gitAt + 1]) {
+    return {
+      organization: host.replace(".visualstudio.com", ""),
+      project: decodeURIComponent(parts[0]),
+      repository: decodeURIComponent(parts[gitAt + 1]),
+    };
+  }
+  return null;
+}
+
 export function ListsSidebar({
   onDragStrength,
 }: {
@@ -25,12 +54,13 @@ export function ListsSidebar({
   const [query, setQuery] = useState("");
   const [linking, setLinking] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [manual, setManual] = useState(false);
   const [linkForm, setLinkForm] = useState({
-    name: "",
     organization: "",
     project: "",
     repository: "",
-    branch: "main",
   });
 
   const openList = lists.find((l) => l.id === openId) || null;
@@ -121,10 +151,25 @@ export function ListsSidebar({
   async function saveLink(e: FormEvent) {
     e.preventDefault();
     if (!openId) return;
+    const parsed = readRepoLink(repoUrl);
+    const organization = (manual ? linkForm.organization : parsed?.organization || "").trim();
+    const projectName = (manual ? linkForm.project : parsed?.project || "").trim();
+    const repository = (manual ? linkForm.repository : parsed?.repository || "").trim();
+    if (!organization || !projectName || !repository) {
+      setError("Paste the repository link from Azure DevOps, or fill in the three names.");
+      setManual(true);
+      return;
+    }
     const created = await fetch(`${API_URL}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(linkForm),
+      body: JSON.stringify({
+        name: repository,
+        organization,
+        project: projectName,
+        repository,
+        branch: branch.trim() || "main",
+      }),
     });
     if (!created.ok) {
       setError("Could not save that repository.");
@@ -141,6 +186,8 @@ export function ListsSidebar({
       return;
     }
     setLinking(false);
+    setError(null);
+    setRepoUrl("");
     await loadLists();
   }
 
@@ -271,100 +318,146 @@ export function ListsSidebar({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--line)]">
-        <div className="flex shrink-0 items-center justify-between gap-2 px-5 py-3">
-          <div className="flex min-w-0 items-center gap-2">
-            {visible.length > 0 && (
-              <SelectCircle
-                checked={allPicked}
-                label={allPicked ? "Clear selection" : "Select all tasks"}
-                onToggle={toggleAllVisible}
-              />
-            )}
-            <h2 className="min-w-0 truncate text-sm font-semibold tracking-tight">
-              {picking ? `${picked.length} selected` : openList?.title || "Tasks"}
-            </h2>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {openList?.project ? (
-              <>
-                <span className="max-w-[88px] truncate text-[11px] text-[var(--ink-soft)]">
-                  {openList.project.name}
-                </span>
-                <button type="button" className="btn px-2 py-1 text-[11px]" disabled={syncing} onClick={refreshCode}>
-                  {syncing ? "Refreshing…" : "Refresh code"}
-                </button>
-                <button type="button" className="text-[11px] text-[var(--ink-soft)]" onClick={unlinkProject}>
-                  Unlink
-                </button>
-              </>
-            ) : (
-              <button type="button" className="text-[11px] text-[var(--ink-soft)]" onClick={() => setLinking(true)}>
-                Link a repo
+        <div className="shrink-0 px-5 pb-2 pt-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              {visible.length > 0 && (
+                <SelectCircle
+                  checked={allPicked}
+                  label={allPicked ? "Clear selection" : "Select all tasks"}
+                  onToggle={toggleAllVisible}
+                />
+              )}
+              <h2 className="min-w-0 truncate text-sm font-semibold tracking-tight">
+                {picking ? `${picked.length} selected` : openList?.title || "Tasks"}
+              </h2>
+            </div>
+            {picking ? (
+              <button
+                type="button"
+                className="btn shrink-0 px-3 py-1 text-xs"
+                disabled={removing}
+                onClick={removePicked}
+              >
+                Delete
               </button>
+            ) : (
+              isMeeting && (
+                <div className="flex rounded-full bg-[var(--paper-deep)] p-0.5 text-xs">
+                  <button
+                    type="button"
+                    className={`rounded-full px-2.5 py-1 ${mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
+                    onClick={() => setMine(true)}
+                  >
+                    Mine
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-full px-2.5 py-1 ${!mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
+                    onClick={() => setMine(false)}
+                  >
+                    All
+                  </button>
+                </div>
+              )
             )}
           </div>
+          {!picking && openList && (
+            <div className="mt-1 pl-6">
+              {openList.project ? (
+                <p className="flex items-center gap-2 text-[11px] text-[var(--ink-soft)]">
+                  <span className="min-w-0 truncate">
+                    Code from {openList.project.name}
+                    {openList.project.branch ? ` · ${openList.project.branch}` : ""}
+                  </span>
+                  <button type="button" className="shrink-0 underline" disabled={syncing} onClick={refreshCode}>
+                    {syncing ? "Refreshing…" : "Refresh"}
+                  </button>
+                  <button type="button" className="shrink-0 underline" onClick={unlinkProject}>
+                    Remove
+                  </button>
+                </p>
+              ) : (
+                <button
+                  type="button"
+                  className="text-[11px] text-[var(--ink-soft)] underline"
+                  onClick={() => setLinking((open) => !open)}
+                >
+                  Connect the code for this list
+                </button>
+              )}
+            </div>
+          )}
         </div>
         {openList?.project?.sync_error && (
-          <p className="px-5 pb-2 text-xs text-[#b42318]">{openList.project.sync_error}</p>
+          <p className="px-5 pb-2 pl-11 text-xs text-[#b42318]">{openList.project.sync_error}</p>
         )}
-        {linking && (
-          <form onSubmit={saveLink} className="grid shrink-0 gap-2 px-4 pb-3">
-            {(
-              [
-                ["name", "Name"],
-                ["organization", "Organization"],
-                ["project", "Project"],
-                ["repository", "Repository"],
-                ["branch", "Branch"],
-              ] as const
-            ).map(([key, label]) => (
+        {linking && !openList?.project && (
+          <form onSubmit={saveLink} className="mx-4 mb-3 shrink-0 rounded-2xl bg-white px-3 py-3">
+            <p className="text-sm">Paste the repository link</p>
+            <p className="mt-1 text-[11px] leading-4 text-[var(--ink-soft)]">
+              In Azure DevOps, open the repo and copy the address bar. It looks like
+              dev.azure.com/your-company/Stormcast/_git/Stormcast
+            </p>
+            <input
+              autoFocus
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              placeholder="Paste the link here"
+              className="mt-2 w-full rounded-xl bg-[var(--paper)] px-3 py-2 text-sm outline-none"
+            />
+            {readRepoLink(repoUrl) && (
+              <p className="mt-2 text-[11px] text-[var(--ink-soft)]">
+                {readRepoLink(repoUrl)?.organization} / {readRepoLink(repoUrl)?.project} /{" "}
+                {readRepoLink(repoUrl)?.repository}
+              </p>
+            )}
+            <label className="mt-2 block text-[11px] text-[var(--ink-soft)]">
+              Branch, if it is not main
               <input
-                key={key}
-                value={linkForm[key]}
-                placeholder={key === "branch" ? "main" : label}
-                onChange={(e) => setLinkForm((cur) => ({ ...cur, [key]: e.target.value }))}
-                className="w-full rounded-full bg-white px-4 py-2 text-sm outline-none"
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+                className="mt-1 w-full rounded-xl bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] outline-none"
               />
-            ))}
-            <div className="flex gap-2">
-              <button type="submit" className="btn px-3 py-1 text-xs">
-                Save
+            </label>
+            {manual && (
+              <div className="mt-2 grid gap-2">
+                {(
+                  [
+                    ["organization", "Company", "The name in dev.azure.com/this-part"],
+                    ["project", "Project", "The project that holds the repo, often Stormcast"],
+                    ["repository", "Repository", "The Git repo name at the end of the link"],
+                  ] as const
+                ).map(([key, label, hint]) => (
+                  <label key={key} className="text-[11px] text-[var(--ink-soft)]">
+                    {label}
+                    <span className="mt-0.5 block">{hint}</span>
+                    <input
+                      value={linkForm[key]}
+                      onChange={(e) => setLinkForm((cur) => ({ ...cur, [key]: e.target.value }))}
+                      className="mt-1 w-full rounded-xl bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] outline-none"
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="mt-3 flex items-center gap-3">
+              <button type="submit" className="btn btn-solid px-3 py-1 text-xs">
+                Connect
               </button>
-              <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setLinking(false)}>
+              <button type="button" className="text-[11px] text-[var(--ink-soft)]" onClick={() => setLinking(false)}>
                 Cancel
+              </button>
+              <button
+                type="button"
+                className="ml-auto text-[11px] text-[var(--ink-soft)] underline"
+                onClick={() => setManual((open) => !open)}
+              >
+                {manual ? "Paste a link instead" : "Type the names"}
               </button>
             </div>
           </form>
         )}
-        {picking ? (
-            <button
-              type="button"
-              className="btn shrink-0 px-3 py-1 text-xs"
-              disabled={removing}
-              onClick={removePicked}
-            >
-              Delete
-            </button>
-          ) : (
-            isMeeting && (
-              <div className="flex rounded-full bg-[var(--paper-deep)] p-0.5 text-xs">
-                <button
-                  type="button"
-                  className={`rounded-full px-2.5 py-1 ${mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
-                  onClick={() => setMine(true)}
-                >
-                  Mine
-                </button>
-                <button
-                  type="button"
-                  className={`rounded-full px-2.5 py-1 ${!mine ? "bg-white shadow-sm" : "text-[var(--ink-soft)]"}`}
-                  onClick={() => setMine(false)}
-                >
-                  All
-                </button>
-              </div>
-            )
-          )}
         <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
           <input
             value={query}
