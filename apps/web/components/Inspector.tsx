@@ -143,6 +143,7 @@ function fileKindLabel(file: Artifact) {
   if (isDrawioFile(file)) return "draw.io";
   if (isSheetFile(file)) return "Sheet";
   if (isPdfFile(file)) return "PDF";
+  if (/\.md$/i.test(file.name) || file.kind === "report") return "Notes";
   if (isImageFile(file)) return "Image";
   return file.name;
 }
@@ -836,6 +837,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                     <span className="ml-1 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-[var(--ink)] align-middle" />
                   )}
                 </div>
+              )}
+              {item.status === "blocked" && item.error && item.error !== reply && (
+                <p className="text-xs text-[var(--ink-soft)]">{item.error}</p>
               )}
               {files.length > 0 && (
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

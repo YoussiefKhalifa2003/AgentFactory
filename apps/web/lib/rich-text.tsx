@@ -25,6 +25,24 @@ function inline(text: string): ReactNode[] {
   });
 }
 
+function isTableSep(line: string) {
+  return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line.trim());
+}
+
+function isTableLine(line: string) {
+  const t = line.trim();
+  if (!t.includes("|")) return false;
+  if (isTableSep(t)) return true;
+  return t.replace(/\|/g, "").trim().length > 0;
+}
+
+function tableCells(line: string) {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|")) t = t.slice(0, -1);
+  return t.split("|").map((cell) => cell.trim());
+}
+
 function blocks(text: string): string[][] {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const out: string[][] = [];
@@ -38,6 +56,12 @@ function blocks(text: string): string[][] {
   for (const line of lines) {
     if (!line.trim()) {
       flush();
+      continue;
+    }
+    if (isTableLine(line)) {
+      if (kind !== "table") flush();
+      kind = "table";
+      buf.push(line);
       continue;
     }
     if (/^\s*[-*•]\s+/.test(line)) {
@@ -97,6 +121,36 @@ export function RichText({ text }: { text: string }) {
                 <li key={j}>{inline(item)}</li>
               ))}
             </ol>
+          );
+        }
+        if (kind === "table") {
+          const rows = items.filter((ln) => !isTableSep(ln)).map(tableCells);
+          if (!rows.length) return null;
+          const head = rows[0];
+          const bodyRows = rows.slice(1);
+          return (
+            <div key={i} className="sheet-wrap overflow-x-auto">
+              <table className="sheet-table">
+                <thead>
+                  <tr>
+                    {head.map((cell, j) => (
+                      <th key={j}>{inline(cell || " ")}</th>
+                    ))}
+                  </tr>
+                </thead>
+                {bodyRows.length > 0 && (
+                  <tbody>
+                    {bodyRows.map((row, r) => (
+                      <tr key={r}>
+                        {head.map((_, c) => (
+                          <td key={c}>{inline(row[c] || "")}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                )}
+              </table>
+            </div>
           );
         }
         return (

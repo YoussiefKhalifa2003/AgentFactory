@@ -257,6 +257,24 @@ def _is_junk_output(text: str) -> bool:
     )
 
 
+def _is_view_placeholder(text: str) -> bool:
+    blob = re.sub(r"\s+", " ", (text or "").strip().lower())
+    return blob in {
+        "pdf is on this desk. use view.",
+        "sheet is on this desk. use view.",
+        "diagram is on this desk. use view.",
+        "built a page. use view on this desk.",
+    }
+
+
+def _desk_text(leftover: str, source: str) -> str:
+    leftover = (leftover or "").strip()
+    source = (source or "").strip()
+    if not leftover or _is_view_placeholder(leftover):
+        return source
+    return leftover
+
+
 def _parse_tool_args(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -291,7 +309,7 @@ def _parse_tool_args(raw: Any) -> dict[str, Any]:
 
 def _done_text(body: str, ws: Path) -> str:
     body = (body or "").strip()
-    if _is_junk_output(body):
+    if _is_junk_output(body) or _is_view_placeholder(body):
         body = ""
     files = [f for f in sandbox.list_files(ws) if not _is_junk_output(sandbox.read_file(ws, f))]
     if body and re.match(r"^done\b", body, re.I):
@@ -438,15 +456,22 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
         return (True, "reply") if output else (False, "empty")
 
     if "research" in strengths:
-        report = next((f for f in files if f.endswith(".md")), None)
-        if not report:
-            return False, "Research needs a notes file with a source."
-        text = sandbox.read_file(ws, report)
-        if re.search(r"https?://", text):
-            return True, "cited URL present"
-        if len(text.strip()) > 80 and re.search(r"https?://", prompt or ""):
+        notes = ""
+        for name in files:
+            if name.endswith((".md", ".txt")):
+                notes += sandbox.read_file(ws, name) + "\n"
+        blob = f"{notes}\n{output or ''}"
+        if any(name.endswith((".pdf", ".csv", ".tsv", ".html", ".htm")) for name in files):
+            return True, "pack"
+        if len(blob.strip()) > 80:
             return True, "notes"
-        return False, "Research notes have no source."
+        if re.search(r"https?://", blob):
+            return True, "cited"
+        if (output or "").strip() and not _is_view_placeholder(output):
+            return True, "reply"
+        if files:
+            return True, "files"
+        return False, "empty"
 
     return (True, "ok") if output else (False, "empty")
 
@@ -535,12 +560,22 @@ def _workspace_recap(ws: Path) -> str:
     files = sandbox.list_files(ws)
     if not files:
         return ""
+    preferred: list[str] = []
+    rest: list[str] = []
     for name in files:
-        if not name.endswith((".py", ".md", ".txt")):
-            continue
+        low = name.lower()
+        if low.endswith(".md"):
+            preferred.append(name)
+        elif low.endswith((".txt", ".csv", ".tsv")):
+            preferred.append(name)
+        elif low.endswith(".py"):
+            rest.append(name)
+    for name in preferred + rest:
         body = sandbox.read_file(ws, name)
-        if _is_junk_output(body):
+        if _is_junk_output(body) or not body.strip():
             continue
+        if name.endswith((".md", ".csv", ".tsv")):
+            return body[:12_000]
         return f"{name}\n{body[:8000]}"
     return ""
 
@@ -631,7 +666,6 @@ async def _save_diagrams(
             transcripts.append(rel)
     if transcripts:
         leftover = local.FENCE.sub("", leftover).strip()
-        leftover = leftover or "Diagram is on this desk. Use View."
     mermaid = dia.maybe_mermaid_source(leftover)
     files = sandbox.list_files(ws)
     has_diagram = any(f.endswith((".mmd", ".drawio")) for f in files)
@@ -649,9 +683,10 @@ async def _save_diagrams(
             broadcast,
         )
         transcripts.append("diagram.drawio")
-        leftover = leftover.replace(mermaid, "").strip() or "Diagram is on this desk. Use View."
+        leftover = leftover.replace(mermaid, "").strip()
     elif mermaid and has_diagram:
         leftover = leftover.replace(mermaid, "").strip() or leftover
+    leftover = _desk_text(leftover, mermaid if mermaid else leftover)
     return transcripts, leftover
 
 
@@ -671,7 +706,7 @@ async def _save_sheet(
             await _run_named_tool(
                 ws, "write_file", {"path": "sheet.csv", "content": body}, job, agent, broadcast
             )
-            leftover = local.FENCE.sub("", leftover).strip() or "Sheet is on this desk. Use View."
+            leftover = _desk_text(local.FENCE.sub("", leftover).strip(), body)
             return ["sheet.csv"], leftover
     csv_src = packs.maybe_csv_source(leftover)
     has_sheet = any(f.endswith(".csv") for f in sandbox.list_files(ws))
@@ -679,7 +714,7 @@ async def _save_sheet(
         await _run_named_tool(
             ws, "write_file", {"path": "sheet.csv", "content": csv_src}, job, agent, broadcast
         )
-        leftover = leftover.replace(csv_src, "").strip() or "Sheet is on this desk. Use View."
+        leftover = _desk_text(leftover.replace(csv_src, "").strip(), csv_src)
         transcripts.append("sheet.csv")
     return transcripts, leftover
 
@@ -722,8 +757,8 @@ async def _save_pdf(
             sandbox.write_bytes(ws, "pack.pdf", packs.markdown_to_pdf(md, title=title))
         except Exception:
             leftover = leftover or "Wrote pack.md. Couldn't make the PDF."
-            return ["pack.md"], leftover
-    leftover = leftover or "PDF is on this desk. Use View."
+            return ["pack.md"], _desk_text(leftover, md)
+    leftover = _desk_text(leftover, md)
     return ["pack.pdf"], leftover
 
 
@@ -1006,6 +1041,15 @@ def _block_job(
     kept = output if output is not None else str(job.get("output") or "")
     if kept.strip() == (note or "").strip():
         kept = ""
+    try:
+        ws = sandbox.workspace(str(agent.get("id") or job.get("agent_id") or ""), job_id)
+        if _is_view_placeholder(kept) or not kept.strip():
+            recap = _workspace_recap(ws)
+            if recap:
+                kept = recap
+        _collect_artifacts({**job, "id": job_id}, agent, ws, broadcast)
+    except Exception:
+        pass
     short = (note or "Couldn't complete").split("\n", 1)[0][:180]
     db.update_job(
         job_id,
@@ -1094,11 +1138,15 @@ async def _finish(
         return
     local.materialize_site(ws, output)
     local.heal_site(ws)
+    if _is_view_placeholder(output) or not (output or "").strip():
+        recap = _workspace_recap(ws)
+        if recap:
+            output = recap
+    _collect_artifacts(job, agent, ws, broadcast)
     ok, note = _verify(agent, ws, prompt, output)
     if not ok:
         _block_job(job_id, agent, broadcast, note, output=output)
         return
-    _collect_artifacts(job, agent, ws, broadcast)
     db.update_job(
         job_id,
         status="done",
@@ -1366,10 +1414,14 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                 except zen.ZenError:
                     pass
             final_text = _done_text(_catalog.collapse_repeats(final_text), ws)
-            if (not final_text or _is_junk_output(final_text)) and local.site_gap(ws) is None:
+            if not final_text or _is_junk_output(final_text) or _is_view_placeholder(final_text):
+                recap = _workspace_recap(ws)
+                if recap:
+                    final_text = recap
+            if not final_text or _is_junk_output(final_text):
                 files = sandbox.list_files(ws)
-                if any(name.endswith((".html", ".htm")) for name in files):
-                    final_text = "Built a page. Use View on this desk."
+                if files:
+                    final_text = _workspace_recap(ws) or f"Wrote {', '.join(files)}."
             if not final_text or _is_junk_output(final_text):
                 final_text, used_model = await _salvage_answer(
                     job_id, agent, ws, broadcast, prompt, used_model, on_token

@@ -119,7 +119,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
         if (!liveJob?.id) continue;
         const server = byId.get(liveJob.id);
         if (!server) continue;
-        if (busyStatus(liveJob.status) && settledStatus(server.status)) {
+        if (server && settledStatus(server.status) && liveJob.status !== server.status) {
           next[agentId] = {
             ...slot,
             job: { ...liveJob, ...server },
