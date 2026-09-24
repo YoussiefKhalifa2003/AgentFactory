@@ -40,7 +40,7 @@ def connect() -> sqlite3.Connection:
     return con
 
 
-def init_db() -> None:
+def init_db() -> list[str]:
     DATA.mkdir(parents=True, exist_ok=True)
     WORKSPACES.mkdir(parents=True, exist_ok=True)
     PFPS.mkdir(parents=True, exist_ok=True)
@@ -148,7 +148,7 @@ def init_db() -> None:
     seed_starters()
     seed_inbox()
     remap_free_models()
-    recover_stuck_jobs()
+    return recover_stuck_jobs()
 
 
 def _ensure_column(con: sqlite3.Connection, table: str, name: str, decl: str) -> None:
@@ -271,9 +271,10 @@ def delete_agent(agent_id: str) -> bool:
     return True
 
 
-def recover_stuck_jobs() -> None:
-    """A reload killed the task. Put the list item back in the queue."""
+def recover_stuck_jobs() -> list[str]:
+    """A reload killed the worker. Keep the same jobs so the new process can run them."""
     now = utcnow()
+    ids: list[str] = []
     with _lock:
         con = connect()
         rows = con.execute(
@@ -283,12 +284,13 @@ def recover_stuck_jobs() -> None:
             """
         ).fetchall()
         for row in rows:
+            ids.append(str(row["id"]))
             con.execute(
                 """
                 UPDATE jobs
-                SET status='cancelled', activity='cancelled',
-                    caption='Interrupted — send the job again',
-                    error='The server restarted while this job was running.',
+                SET status='queued', activity='idle',
+                    caption='Picking up after a restart',
+                    error=NULL,
                     updated_at=?
                 WHERE id=?
                 """,
@@ -298,13 +300,14 @@ def recover_stuck_jobs() -> None:
                 con.execute(
                     """
                     UPDATE list_items
-                    SET status='assigned', job_id=NULL, updated_at=?
+                    SET status='working', job_id=?, updated_at=?
                     WHERE id=?
                     """,
-                    (now, row["task_id"]),
+                    (row["id"], now, row["task_id"]),
                 )
         con.commit()
         con.close()
+    return ids
 
 
 def list_jobs(agent_id: str | None = None) -> list[dict[str, Any]]:

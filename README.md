@@ -161,7 +161,7 @@ flowchart LR
 3. The harness may call tools, then salvage fences (HTML, mermaid, CSV, markdown) so a claimed file actually exists.
 4. Artifacts are collected at finish. **View** reads them from the API.
 
-Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. **Spark 1 also runs one factory job at a time** — a second stream used to sit in Spark’s queue until Cade finished, which made Yousef look stuck. The second Spark desk now starts immediately on Spark 2 (if that key works) or on OpenRouter / Zen instead of waiting. A second local job shows **Waiting for the local GPU…**; a second Spark job shows **Spark is busy — switching**.
+Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. **Spark 1 also runs one factory job at a time** — a second stream used to sit in Spark’s queue until Cade finished, which made Yousef look stuck. The second Spark desk now starts immediately on Spark 2 (if that key works) or on OpenRouter / Zen instead of waiting. A second local job shows **Waiting for the local GPU…**; a second Spark job shows **Spark is busy — switching**. If the API reloads while desks are working, those jobs pick back up on the same desks instead of showing **Stopped**. Stop is only when you halt a job from the desk.
 
 ---
 

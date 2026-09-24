@@ -133,11 +133,19 @@ class AssignIn(BaseModel):
 async def startup() -> None:
     global loop
     loop = asyncio.get_running_loop()
-    db.init_db()
+    resumed = db.init_db()
+    seen: set[str] = set()
+    for job_id in resumed:
+        job = db.get_job(job_id)
+        if not job or job["id"] in seen:
+            continue
+        seen.add(job["id"])
+        harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
     for agent in db.list_agents():
         nxt = lists.start_next(agent["id"])
         job = (nxt or {}).get("job")
-        if job:
+        if job and job["id"] not in seen:
+            seen.add(job["id"])
             harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
 
 

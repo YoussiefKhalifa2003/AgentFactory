@@ -882,6 +882,7 @@ def _touch_task(job_id: str, status: str, broadcast: Broadcast) -> None:
 
 
 _running: dict[str, asyncio.Task] = {}
+_cancel_requested: set[str] = set()
 
 
 def track_job(job_id: str, task: asyncio.Task) -> None:
@@ -892,6 +893,7 @@ def request_cancel(job_id: str, broadcast: Broadcast | None = None) -> bool:
     job = db.get_job(job_id)
     if not job or job.get("status") not in {"queued", "thinking", "tool"}:
         return False
+    _cancel_requested.add(job_id)
     task = _running.get(job_id)
     if task and not task.done():
         task.cancel()
@@ -900,7 +902,13 @@ def request_cancel(job_id: str, broadcast: Broadcast | None = None) -> bool:
     return True
 
 
+def _clear_cancel(job_id: str) -> None:
+    _cancel_requested.discard(job_id)
+    _running.pop(job_id, None)
+
+
 def _settle_cancel(job_id: str, job: dict[str, Any], broadcast: Broadcast | None = None) -> None:
+    _clear_cancel(job_id)
     db.update_job(
         job_id,
         status="cancelled",
@@ -1038,6 +1046,7 @@ def _block_job(
     output: str | None = None,
 ) -> None:
     job = db.get_job(job_id) or {}
+    _clear_cancel(job_id)
     kept = output if output is not None else str(job.get("output") or "")
     if kept.strip() == (note or "").strip():
         kept = ""
@@ -1136,6 +1145,7 @@ async def _finish(
     job = db.get_job(job_id)
     if not job:
         return
+    _clear_cancel(job_id)
     local.materialize_site(ws, output)
     local.heal_site(ws)
     if _is_view_placeholder(output) or not (output or "").strip():
@@ -1437,8 +1447,9 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
             if not pump.task.done():
                 await pump.close()
     except asyncio.CancelledError:
-        current = db.get_job(job_id) or job
-        _settle_cancel(job_id, current, broadcast)
+        if job_id in _cancel_requested:
+            current = db.get_job(job_id) or job
+            _settle_cancel(job_id, current, broadcast)
         return
     except zen.ZenError as err:
         partial = ""
@@ -1450,15 +1461,25 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
     except Exception:
         log.exception("job %s failed", job_id)
         token_cb = locals().get("on_token")
-        recovered, used_model = await _salvage_answer(
-            job_id,
-            agent,
-            ws,
-            broadcast,
-            prompt,
-            used_model,
-            token_cb if callable(token_cb) else None,
-        )
+        recovered = ""
+        try:
+            recovered, used_model = await _salvage_answer(
+                job_id,
+                agent,
+                ws,
+                broadcast,
+                prompt,
+                used_model,
+                token_cb if callable(token_cb) else None,
+            )
+        except asyncio.CancelledError:
+            if job_id in _cancel_requested:
+                current = db.get_job(job_id) or job
+                _settle_cancel(job_id, current, broadcast)
+            return
+        except Exception:
+            log.exception("job %s salvage failed", job_id)
+            recovered = ""
         if recovered:
             await _finish(job_id, agent, ws, broadcast, recovered, used_model, prompt)
             return
