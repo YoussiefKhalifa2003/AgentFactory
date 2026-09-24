@@ -161,7 +161,7 @@ flowchart LR
 3. The harness may call tools, then salvage fences (HTML, mermaid, CSV, markdown) so a claimed file actually exists.
 4. Artifacts are collected at finish. **View** reads them from the API.
 
-Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. Spark can run up to four desks together; a fifth waits for a Spark slot. OpenRouter and Zen are unconstrained. A second local job shows **Waiting for the local GPU…**
+Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. **Spark 1 also runs one factory job at a time** — a second stream used to sit in Spark’s queue until Cade finished, which made Yousef look stuck. The second Spark desk now starts immediately on Spark 2 (if that key works) or on OpenRouter / Zen instead of waiting. A second local job shows **Waiting for the local GPU…**; a second Spark job shows **Spark is busy — switching**.
 
 ---
 
@@ -178,7 +178,7 @@ Each agent has one brain. Switch it on the desk.
 
 A useful mix on a 4090: Ada on local 35B **and** Euclid on Gemini at the same time. Two 35B loads will not fit; the lock exists so they take turns instead of crashing.
 
-Spark is the DGX on the office LAN (`192.168.100.129:4000`), not OpenCode’s `muse-spark` model names. Ollama on Spark is not reachable from this PC — jobs go through the LiteLLM gateway. Office network only. Use your engineer key, not the shared admin master key.
+Spark is the DGX on the office LAN (`192.168.100.129:4000`), not OpenCode’s `muse-spark` model names. Ollama on Spark is not reachable from this PC — jobs go through the LiteLLM gateway. Spark 2 is `192.168.100.127:4000` and needs its own engineer key (`SPARK2_API_KEY`); Spark 1’s key is rejected there. Office network only. Use your engineer key, not the shared admin master key.
 
 ---
 
@@ -314,7 +314,9 @@ Two PowerShell windows: API on **8000**, UI on **3000**.
 | `OPENROUTER_BASE_URL` | Default `https://openrouter.ai/api/v1` |
 | `OLLAMA_BASE_URL` | Default `http://127.0.0.1:11434` |
 | `SPARK_BASE_URL` | Default `http://192.168.100.129:4000/v1` (Spark 1 LiteLLM) |
-| `SPARK_API_KEY` | Engineer key for the Spark gateway |
+| `SPARK_API_KEY` | Engineer key for Spark 1 |
+| `SPARK2_BASE_URL` | Default `http://192.168.100.127:4000/v1` (Spark 2 LiteLLM) |
+| `SPARK2_API_KEY` | Engineer key for Spark 2 (Spark 1’s key does not work here) |
 | `MEETING_NOTES_DB_PATH` | Optional Meeting Note Taker SQLite |
 | `MEETING_ME_ALIASES` | Names treated as “mine” on meeting actions |
 | `AZURE_DEVOPS_PAT` | Read code from a linked Azure DevOps repository |

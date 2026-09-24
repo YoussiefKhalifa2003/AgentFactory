@@ -22,7 +22,9 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY") or ""
 OLLAMA_BASE = (os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
 # DGX Spark LiteLLM gateway (office LAN). Ollama on Spark is not open on the LAN.
 SPARK_BASE = (os.getenv("SPARK_BASE_URL") or "http://192.168.100.129:4000/v1").rstrip("/")
+SPARK2_BASE = (os.getenv("SPARK2_BASE_URL") or "http://192.168.100.127:4000/v1").rstrip("/")
 SPARK_KEY = os.getenv("SPARK_API_KEY") or ""
+SPARK2_KEY = os.getenv("SPARK2_API_KEY") or SPARK_KEY
 
 # Three desks that fit a 24GB 4090. Names match this machine's Ollama tags.
 LOCAL_PINNED: list[dict[str, str]] = [
@@ -143,10 +145,14 @@ _openrouter_until = 0.0
 _spark_models: set[str] = set()
 _spark_until = 0.0
 _spark_ok = False
+_spark2_ok = False
+_spark2_until = 0.0
 # One Ollama generation at a time — a 4090 cannot hold two big local models.
 _gpu_lock = asyncio.Lock()
-# Spark's LiteLLM gateway has four chat slots. A fifth waits instead of hanging.
-_spark_slots = asyncio.Semaphore(4)
+# Each Spark box queues extra Ollama streams until the first finishes, so the
+# factory keeps one live generation per box and sends the next desk elsewhere.
+_spark_box_use: dict[str, int] = {}
+_spark_box_lock = asyncio.Lock()
 
 
 def _entry(row: dict[str, str], available: bool) -> dict[str, Any]:
@@ -194,11 +200,30 @@ def spark_reachable() -> bool:
     return _spark_ok
 
 
-def _spark_v1() -> str:
-    url = SPARK_BASE.rstrip("/")
-    if not url.endswith("/v1"):
-        url += "/v1"
-    return url
+def _spark_v1(url: str | None = None) -> str:
+    raw = (url or SPARK_BASE).rstrip("/")
+    if not raw.endswith("/v1"):
+        raw += "/v1"
+    return raw
+
+
+async def claim_spark_box() -> str | None:
+    boxes = [_spark_v1(SPARK_BASE)]
+    if _spark2_ok:
+        other = _spark_v1(SPARK2_BASE)
+        if other not in boxes:
+            boxes.append(other)
+    async with _spark_box_lock:
+        for box in boxes:
+            if _spark_box_use.get(box, 0) < 1:
+                _spark_box_use[box] = _spark_box_use.get(box, 0) + 1
+                return box
+        return None
+
+
+async def release_spark_box(box: str) -> None:
+    async with _spark_box_lock:
+        _spark_box_use[box] = max(0, _spark_box_use.get(box, 0) - 1)
 
 
 def default_model_id() -> str:
@@ -336,6 +361,28 @@ async def refresh_spark() -> set[str]:
     _spark_models = found
     _spark_until = now + (20 if found else 8)
     return found
+
+
+async def refresh_spark2() -> bool:
+    """Spark 2 uses a different LiteLLM engineer key. Skip it until that key works."""
+    global _spark2_ok, _spark2_until
+    now = time.monotonic()
+    if _spark2_until > now:
+        return _spark2_ok
+    ok = False
+    if SPARK2_KEY and SPARK2_BASE:
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                r = await client.get(
+                    f"{_spark_v1(SPARK2_BASE)}/models",
+                    headers={"Authorization": f"Bearer {SPARK2_KEY}"},
+                )
+                ok = r.status_code < 400
+        except httpx.HTTPError:
+            ok = False
+    _spark2_ok = ok
+    _spark2_until = now + (20 if ok else 60)
+    return ok
 
 
 async def openai_chat(
@@ -945,12 +992,19 @@ async def ollama_chat_stream(
     )
 
 
+def _spark_key_for(base: str) -> str:
+    if _spark_v1(base) == _spark_v1(SPARK2_BASE):
+        return SPARK2_KEY
+    return SPARK_KEY
+
+
 async def chat(
     model_id: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     on_token: TokenCb | None = None,
     on_think: TokenCb | None = None,
+    spark_base: str | None = None,
 ) -> dict[str, Any]:
     provider, backend = parse_model(model_id)
     if provider == "openrouter":
@@ -981,11 +1035,13 @@ async def chat(
             timeout=300,
         )
     if provider == "spark":
-        if not SPARK_KEY:
+        base = spark_base or SPARK_BASE
+        key = _spark_key_for(base)
+        if not key:
             raise zen.ZenError(401, "SPARK_API_KEY is missing")
         return await openai_chat_stream(
-            SPARK_BASE,
-            SPARK_KEY,
+            base,
+            key,
             backend,
             messages,
             tools=tools,
@@ -1020,6 +1076,7 @@ async def complete_with_failover(
 ) -> tuple[dict[str, Any], str]:
     await refresh_local()
     await refresh_spark()
+    await refresh_spark2()
     chain = failover_chain(preferred)
     last_error: zen.ZenError | None = None
     for model_id in chain:
@@ -1032,7 +1089,7 @@ async def complete_with_failover(
             last_error = zen.ZenError(401, f"{label} needs SPARK_API_KEY in .env")
             continue
         gpu_held = False
-        spark_held = False
+        spark_box = ""
         try:
             if provider == "local":
                 if _gpu_lock.locked() and on_caption:
@@ -1040,12 +1097,20 @@ async def complete_with_failover(
                 await _gpu_lock.acquire()
                 gpu_held = True
             if provider == "spark":
-                if _spark_slots.locked() and on_caption:
-                    on_caption("Waiting for Spark…")
-                await _spark_slots.acquire()
-                spark_held = True
+                claimed = await claim_spark_box()
+                if not claimed:
+                    if on_caption:
+                        on_caption("Spark is busy — switching")
+                    last_error = zen.ZenError(429, "Spark is busy")
+                    continue
+                spark_box = claimed
             if on_caption:
-                on_caption(f"Working with {label}" if len(chain) > 1 and model_id != chain[0] else "Working")
+                if spark_box and _spark_v1(spark_box) != _spark_v1(SPARK_BASE):
+                    on_caption("Working on Spark 2")
+                elif len(chain) > 1 and model_id != chain[0]:
+                    on_caption(f"Working with {label}")
+                else:
+                    on_caption("Working")
 
             async def run(use_tools: list[dict[str, Any]] | None) -> dict[str, Any]:
                 pulse_alive = True
@@ -1088,6 +1153,7 @@ async def complete_with_failover(
                         tools=use_tools,
                         on_token=wrapped_token,
                         on_think=wrapped_think,
+                        spark_base=spark_box or None,
                     )
                 finally:
                     pulse.cancel()
@@ -1119,8 +1185,8 @@ async def complete_with_failover(
         finally:
             if gpu_held:
                 _gpu_lock.release()
-            if spark_held:
-                _spark_slots.release()
+            if spark_box:
+                await release_spark_box(spark_box)
     raise last_error or zen.ZenError(502, "No model could run this job")
 
 
