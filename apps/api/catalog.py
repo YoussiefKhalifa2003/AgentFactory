@@ -1,4 +1,4 @@
-"""Which brains a bay can use: OpenRouter, local Ollama, OpenCode Zen."""
+"""Which brains a bay can use: OpenRouter, local Ollama, OpenCode Zen, Spark."""
 
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ load_dotenv()
 OPENROUTER_BASE = (os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").rstrip("/")
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY") or ""
 OLLAMA_BASE = (os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
+# DGX Spark LiteLLM gateway (office LAN). Ollama on Spark is not open on the LAN.
+SPARK_BASE = (os.getenv("SPARK_BASE_URL") or "http://192.168.100.129:4000/v1").rstrip("/")
+SPARK_KEY = os.getenv("SPARK_API_KEY") or ""
 
 # Three desks that fit a 24GB 4090. Names match this machine's Ollama tags.
 LOCAL_PINNED: list[dict[str, str]] = [
@@ -88,10 +91,58 @@ ZEN_PINNED: list[dict[str, str]] = [
     for model in zen.CHAT_MODELS
 ]
 
+# Chat routes on Spark 1's LiteLLM gateway. Whisper / embeddings stay off this list.
+SPARK_PINNED: list[dict[str, str]] = [
+    {
+        "id": "spark:qwen3.6:35b-a3b",
+        "name": "Qwen3.6 35B",
+        "provider": "spark",
+        "backend": "qwen3.6:35b-a3b",
+        "hint": "Spark · everyday jobs · tools",
+        "vram": "MoE · 32K",
+    },
+    {
+        "id": "spark:qwen3.8",
+        "name": "Qwen3.8 27B",
+        "provider": "spark",
+        "backend": "qwen3.8",
+        "hint": "Spark · strongest general · tools",
+        "vram": "~17 GB",
+    },
+    {
+        "id": "spark:qwen3-vl:32b",
+        "name": "Qwen3 VL 32B",
+        "provider": "spark",
+        "backend": "qwen3-vl:32b",
+        "hint": "Spark · vision · loads on demand",
+        "vram": "~20 GB",
+    },
+    {
+        "id": "spark:qwen3-vl:8b",
+        "name": "Qwen3 VL 8B",
+        "provider": "spark",
+        "backend": "qwen3-vl:8b",
+        "hint": "Spark · fast vision",
+        "vram": "~6 GB",
+    },
+]
+_SPARK_HIDE = {
+    "bge-m3",
+    "whisper-large-v3",
+    "qwen3.6-35b",
+    "qwen3.8:latest",
+    "qwen3.6-35b-nvfp4",
+    "qwen38-flash-next-nvfp4",
+    "flash-next",
+}
+
 _ollama_models: set[str] = set()
 _ollama_until = 0.0
 _openrouter_ok = False
 _openrouter_until = 0.0
+_spark_models: set[str] = set()
+_spark_until = 0.0
+_spark_ok = False
 # One Ollama generation at a time — a 4090 cannot hold two big local models.
 _gpu_lock = asyncio.Lock()
 
@@ -114,6 +165,8 @@ def parse_model(model_id: str) -> tuple[str, str]:
         return "openrouter", raw.split(":", 1)[1]
     if raw.startswith("local:") or raw.startswith("ollama:"):
         return "local", raw.split(":", 1)[1]
+    if raw.startswith("spark:"):
+        return "spark", raw.split(":", 1)[1]
     if raw.startswith("zen:"):
         return "zen", raw.split(":", 1)[1]
     if "/" in raw:
@@ -122,13 +175,28 @@ def parse_model(model_id: str) -> tuple[str, str]:
 
 
 def known_ids() -> set[str]:
-    ids = {row["id"] for row in LOCAL_PINNED + OPENROUTER_PINNED + ZEN_PINNED}
+    ids = {row["id"] for row in LOCAL_PINNED + OPENROUTER_PINNED + ZEN_PINNED + SPARK_PINNED}
     ids.update(zen.CHAT_MODELS)
     return ids
 
 
 def openrouter_enabled() -> bool:
     return bool(OPENROUTER_KEY)
+
+
+def spark_enabled() -> bool:
+    return bool(SPARK_KEY)
+
+
+def spark_reachable() -> bool:
+    return _spark_ok
+
+
+def _spark_v1() -> str:
+    url = SPARK_BASE.rstrip("/")
+    if not url.endswith("/v1"):
+        url += "/v1"
+    return url
 
 
 def default_model_id() -> str:
@@ -144,12 +212,14 @@ def default_model_id() -> str:
 
 def label_for(model_id: str) -> str:
     raw = (model_id or "").strip()
-    for row in LOCAL_PINNED + OPENROUTER_PINNED + ZEN_PINNED:
+    for row in LOCAL_PINNED + OPENROUTER_PINNED + ZEN_PINNED + SPARK_PINNED:
         if row["id"] == raw:
             return row["name"]
     provider, backend = parse_model(raw)
     if provider == "openrouter":
         return backend.split("/")[-1] or backend
+    if provider == "spark":
+        return f"Spark {backend}"
     return backend or "the selected model"
 
 
@@ -221,6 +291,49 @@ async def refresh_openrouter() -> bool:
     _openrouter_ok = ok
     _openrouter_until = now + (60 if ok else 12)
     return ok
+
+
+def _spark_chat_name(name: str) -> bool:
+    low = (name or "").lower()
+    if name in _SPARK_HIDE:
+        return False
+    return not any(marker in low for marker in ("whisper", "embed", "bge-", "audio", "nvfp4"))
+
+
+async def refresh_spark() -> set[str]:
+    global _spark_models, _spark_until, _spark_ok
+    now = time.monotonic()
+    if _spark_until > now:
+        return _spark_models
+    found: set[str] = set()
+    ok = False
+    if SPARK_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                r = await client.get(
+                    f"{_spark_v1()}/models",
+                    headers={"Authorization": f"Bearer {SPARK_KEY}"},
+                )
+                if r.status_code < 400:
+                    ok = True
+                    for item in r.json().get("data") or []:
+                        mid = str(item.get("id") or "").strip()
+                        if mid:
+                            found.add(mid)
+        except httpx.HTTPError:
+            ok = False
+    else:
+        origin = _spark_v1()[:-3] if _spark_v1().endswith("/v1") else _spark_v1()
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                r = await client.get(f"{origin}/health/liveliness")
+                ok = r.status_code < 400
+        except httpx.HTTPError:
+            ok = False
+    _spark_ok = ok
+    _spark_models = found
+    _spark_until = now + (20 if found else 8)
+    return found
 
 
 async def openai_chat(
@@ -597,6 +710,7 @@ async def openai_chat_stream(
     extra_headers: dict[str, str] | None = None,
     on_token: TokenCb | None = None,
     on_think: TokenCb | None = None,
+    max_tokens: int = 8192,
 ) -> dict[str, Any]:
     url = base_url.rstrip("/")
     if not url.endswith("/v1"):
@@ -611,7 +725,7 @@ async def openai_chat_stream(
         "model": model,
         "messages": messages,
         "temperature": 0.3,
-        "max_tokens": 8192,
+        "max_tokens": max_tokens,
         "stream": True,
     }
     if tools:
@@ -859,6 +973,20 @@ async def chat(
             on_think=on_think,
             timeout=300,
         )
+    if provider == "spark":
+        if not SPARK_KEY:
+            raise zen.ZenError(401, "SPARK_API_KEY is missing")
+        return await openai_chat_stream(
+            SPARK_BASE,
+            SPARK_KEY,
+            backend,
+            messages,
+            tools=tools,
+            timeout=300,
+            max_tokens=16384,
+            on_token=on_token,
+            on_think=on_think,
+        )
     return await openai_chat_stream(
         zen.BASE,
         zen.API_KEY,
@@ -883,6 +1011,7 @@ async def complete_with_failover(
     on_think: TokenCb | None = None,
 ) -> tuple[dict[str, Any], str]:
     await refresh_local()
+    await refresh_spark()
     chain = failover_chain(preferred)
     last_error: zen.ZenError | None = None
     for model_id in chain:
@@ -890,6 +1019,9 @@ async def complete_with_failover(
         label = label_for(model_id)
         if provider == "openrouter" and not openrouter_enabled():
             last_error = zen.ZenError(401, f"{label} needs an OpenRouter key in .env")
+            continue
+        if provider == "spark" and not spark_enabled():
+            last_error = zen.ZenError(401, f"{label} needs SPARK_API_KEY in .env")
             continue
         gpu_held = False
         try:
@@ -975,6 +1107,7 @@ async def complete_with_failover(
 async def snapshot() -> dict[str, Any]:
     local_names = await refresh_local()
     router_ok = await refresh_openrouter()
+    spark_names = await refresh_spark()
     zen_ok = bool(os.getenv("OPENCODE_API_KEY"))
     catalog: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1006,6 +1139,23 @@ async def snapshot() -> dict[str, Any]:
             },
             True,
         )
+    for row in SPARK_PINNED:
+        push(row, row["backend"] in spark_names)
+    pinned_backends = {r["backend"] for r in SPARK_PINNED}
+    for name in sorted(spark_names):
+        if not _spark_chat_name(name) or name in pinned_backends:
+            continue
+        push(
+            {
+                "id": f"spark:{name}",
+                "name": name,
+                "provider": "spark",
+                "backend": name,
+                "hint": "Spark · LiteLLM",
+                "vram": "",
+            },
+            True,
+        )
     for row in OPENROUTER_PINNED:
         push(row, router_ok)
     for row in ZEN_PINNED:
@@ -1016,6 +1166,7 @@ async def snapshot() -> dict[str, Any]:
         "default": default_model_id(),
         "openrouter": router_ok,
         "ollama": bool(local_names),
+        "spark": bool(spark_names),
         "zen": zen_ok,
         "chat": [row["id"] for row in catalog if row["available"]],
         "models": [row["id"] for row in catalog],

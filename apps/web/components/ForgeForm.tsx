@@ -211,8 +211,8 @@ export function ForgeForm() {
               ))}
             </div>
             <p className="text-sm text-[var(--ink-soft)]">
-              Pick the brain this bay uses. OpenCode Zen if it is free, OpenRouter
-              if you want a cloud desk, or the 4090 on this machine.
+              Pick the brain this bay uses. Spark for the office DGX, the 4090 on
+              this machine, OpenRouter for a cloud desk, or OpenCode Zen if it is free.
             </p>
             <ModelPicker value={model} onChange={setModel} />
             <button

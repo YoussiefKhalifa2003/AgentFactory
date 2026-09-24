@@ -38,10 +38,13 @@ function friendlyText(text: string, live = false) {
   const raw = stripThink(text, live).trim();
   if (!raw) return "";
   if (/freetiererror|only be used from within opencode/i.test(raw)) {
-    return "That OpenCode free model isn’t available here. Pick OpenRouter or a local model.";
+    return "That OpenCode free model isn’t available here. Pick OpenRouter, Spark, or a local model.";
   }
   if (/creditserror|payment method|opencode\.ai\/workspace/i.test(raw)) {
-    return "OpenCode ran out of credit. Switch this bay to OpenRouter or a local model.";
+    return "OpenCode ran out of credit. Switch this bay to OpenRouter, Spark, or a local model.";
+  }
+  if (/spark_api_key is missing|no api key passed in/i.test(raw)) {
+    return "Spark needs SPARK_API_KEY in apps/api/.env.";
   }
   if (/server restarted|interrupted/i.test(raw)) {
     return "Interrupted — assign it again.";

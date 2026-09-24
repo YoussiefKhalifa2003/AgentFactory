@@ -161,7 +161,7 @@ flowchart LR
 3. The harness may call tools, then salvage fences (HTML, mermaid, CSV, markdown) so a claimed file actually exists.
 4. Artifacts are collected at finish. **View** reads them from the API.
 
-Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. Cloud desks (OpenRouter, Zen) are unconstrained. A second local job shows **Waiting for the local GPU…**
+Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. Spark, OpenRouter, and Zen are unconstrained (Spark’s gateway already queues extra chat slots). A second local job shows **Waiting for the local GPU…**
 
 ---
 
@@ -172,12 +172,13 @@ Each agent has one brain. Switch it on the desk.
 | Provider | Examples | Notes |
 | --- | --- | --- |
 | **This machine** (Ollama) | Qwen3 14B (~10 GB), Qwen3.6 35B (~22 GB), Qwen3 VL 8B (~6 GB) | Serialized. Default `http://127.0.0.1:11434` |
+| **Spark** (office DGX) | Qwen3.6 35B, Qwen3.8 27B, Qwen3 VL 32B / 8B | LiteLLM on the office LAN. Needs `SPARK_API_KEY`. Not the 4090. |
 | **OpenRouter** | DeepSeek V3, Gemini 2.5 Flash, GPT-4o mini | Needs `OPENROUTER_API_KEY` |
 | **OpenCode Zen** | `big-pickle`, `mimo-v2.5-free`, `ling-3.0-flash-fin-free` | Free tier. Do not spoof the OpenCode User-Agent |
 
 A useful mix on a 4090: Ada on local 35B **and** Euclid on Gemini at the same time. Two 35B loads will not fit; the lock exists so they take turns instead of crashing.
 
-Spark is **not** used.
+Spark is the DGX on the office LAN (`192.168.100.129:4000`), not OpenCode’s `muse-spark` model names. Ollama on Spark is not reachable from this PC — jobs go through the LiteLLM gateway. Office network only. Use your engineer key, not the shared admin master key.
 
 ---
 
@@ -312,6 +313,8 @@ Two PowerShell windows: API on **8000**, UI on **3000**.
 | `OPENROUTER_API_KEY` | OpenRouter |
 | `OPENROUTER_BASE_URL` | Default `https://openrouter.ai/api/v1` |
 | `OLLAMA_BASE_URL` | Default `http://127.0.0.1:11434` |
+| `SPARK_BASE_URL` | Default `http://192.168.100.129:4000/v1` (Spark 1 LiteLLM) |
+| `SPARK_API_KEY` | Engineer key for the Spark gateway |
 | `MEETING_NOTES_DB_PATH` | Optional Meeting Note Taker SQLite |
 | `MEETING_ME_ALIASES` | Names treated as “mine” on meeting actions |
 | `AZURE_DEVOPS_PAT` | Read code from a linked Azure DevOps repository |
@@ -409,7 +412,8 @@ AgentFactory/
 | Charts | mermaid |
 | API | FastAPI, SQLite, WebSocket |
 | PDF | fpdf2 |
-| Local models | Ollama |
+| Local models | Ollama (this machine) |
+| Office GPU | DGX Spark via LiteLLM |
 | Cloud | OpenRouter, OpenCode Zen |
 
 ---

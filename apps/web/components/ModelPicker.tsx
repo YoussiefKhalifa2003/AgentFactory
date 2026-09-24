@@ -5,6 +5,7 @@ import { API_URL, ModelOption } from "@/lib/types";
 
 const GROUPS: { id: string; label: string }[] = [
   { id: "local", label: "This machine" },
+  { id: "spark", label: "Spark" },
   { id: "openrouter", label: "OpenRouter" },
   { id: "zen", label: "OpenCode Zen" },
 ];

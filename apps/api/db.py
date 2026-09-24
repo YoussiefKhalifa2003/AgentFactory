@@ -528,7 +528,7 @@ def remap_free_models() -> None:
         if not model:
             update_agent(agent["id"], {"model": catalog.default_model_id()})
             continue
-        if model in known or model.startswith(("openrouter:", "local:", "ollama:")):
+        if model in known or model.startswith(("openrouter:", "local:", "ollama:", "spark:")):
             continue
         if model in zen.CHAT_MODELS:
             continue

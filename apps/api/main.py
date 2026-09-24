@@ -1,4 +1,4 @@
-"""Foundry control plane. OpenCode Zen only. Spark is unused."""
+"""Foundry control plane. OpenCode Zen, OpenRouter, local Ollama, and Spark."""
 
 from __future__ import annotations
 
@@ -146,12 +146,13 @@ async def health() -> dict[str, Any]:
     import catalog
 
     local = await catalog.refresh_local()
+    spark = await catalog.refresh_spark()
     return {
         "ok": True,
         "zen": bool(os.getenv("OPENCODE_API_KEY")),
         "openrouter": catalog.openrouter_enabled(),
         "ollama": bool(local),
-        "spark": False,
+        "spark": bool(spark) or catalog.spark_reachable(),
         "routers": llm.configured(),
         "meetings": meetings.status(),
     }
