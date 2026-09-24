@@ -25,6 +25,14 @@ type AssignArgs = {
   listId?: string;
 };
 
+function busyStatus(status?: string) {
+  return ["queued", "thinking", "tool"].includes(status || "");
+}
+
+function settledStatus(status?: string) {
+  return ["done", "blocked", "cancelled"].includes(status || "");
+}
+
 type FactoryContextValue = {
   agents: Agent[];
   jobs: Job[];
@@ -92,6 +100,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!jobs.length) return;
     setLive((prev) => {
+      const byId = new Map(jobs.map((job) => [job.id, job]));
       const latest: Record<string, Job> = {};
       for (const job of jobs) {
         const blob = `${job.caption || ""} ${job.error || ""} ${job.output || ""}`;
@@ -105,6 +114,24 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       }
       let changed = false;
       const next = { ...prev };
+      for (const [agentId, slot] of Object.entries(next)) {
+        const liveJob = slot.job;
+        if (!liveJob?.id) continue;
+        const server = byId.get(liveJob.id);
+        if (!server) continue;
+        if (busyStatus(liveJob.status) && settledStatus(server.status)) {
+          next[agentId] = {
+            ...slot,
+            job: { ...liveJob, ...server },
+            tokens:
+              String(server.output || "").length >= String(slot.tokens || "").length
+                ? server.output || slot.tokens
+                : slot.tokens,
+            think: server.status === "done" ? "" : slot.think,
+          };
+          changed = true;
+        }
+      }
       for (const [id, job] of Object.entries(latest)) {
         if (next[id]?.job) continue;
         next[id] = {
@@ -167,7 +194,10 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       if (closed) return;
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
-      ws.onopen = () => setConnected(true);
+      ws.onopen = () => {
+        setConnected(true);
+        refresh().catch(() => undefined);
+      };
       ws.onclose = () => {
         setConnected(false);
         if (!closed) timer = setTimeout(connect, 1500);
@@ -188,21 +218,23 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
               for (const job of incoming) map.set(job.id, { ...map.get(job.id), ...job });
               return [...map.values()];
             });
-            setLive((prev) => {
-              const next = { ...prev };
-              for (const job of incoming) {
-                const cur = next[job.agent_id];
-                const kept = cur?.job?.id === job.id ? cur.tokens || "" : "";
-                next[job.agent_id] = {
-                  job,
-                  tokens: kept.length >= (job.output || "").length ? kept : job.output || "",
-                  think: cur?.think || "",
-                  artifacts: cur?.artifacts?.length ? cur.artifacts : job.artifacts || [],
-                };
-              }
-              return next;
-            });
           }
+          setLive((prev) => {
+            if (!incoming.length) return prev;
+            const next = { ...prev };
+            for (const job of incoming) {
+              const cur = next[job.agent_id];
+              const kept = cur?.job?.id === job.id ? cur.tokens || "" : "";
+              next[job.agent_id] = {
+                job,
+                tokens: kept.length >= (job.output || "").length ? kept : job.output || "",
+                think: cur?.think || "",
+                artifacts: cur?.artifacts?.length ? cur.artifacts : job.artifacts || [],
+              };
+            }
+            return next;
+          });
+          refresh().catch(() => undefined);
         }
         if (msg.type === "agent.updated" && msg.agent) {
           const next = msg.agent as Agent;
@@ -340,7 +372,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       if (raf) cancelAnimationFrame(raf);
       wsRef.current?.close();
     };
-  }, []);
+  }, [refresh]);
 
   const deleteAgent = useCallback(async (agentId: string) => {
     const r = await fetch(`${API_URL}/api/agents/${agentId}`, { method: "DELETE" });

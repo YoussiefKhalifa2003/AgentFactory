@@ -583,7 +583,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   const portrait = pfpSrc(agent.pfp) || badgeDataUrl(agent.name, agent.pigment);
   const job = state?.job;
   const liveJobId = job?.id;
-  const working = Boolean(job) && !["done", "idle", "blocked"].includes(job?.status || "idle");
+  const working = Boolean(job) && ["queued", "thinking", "tool"].includes(job?.status || "");
   const waiting = tray.filter((item) => item.status === "assigned");
 
   return (

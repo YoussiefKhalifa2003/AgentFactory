@@ -781,6 +781,8 @@ async def openai_chat_stream(
                         if delta.get("tool_calls"):
                             _merge_tool_delta(tool_acc, delta["tool_calls"])
                             files.feed(delta["tool_calls"])
+                        if choice.get("finish_reason"):
+                            break
                         await asyncio.sleep(0)
             except httpx.TimeoutException:
                 last = zen.ZenError(504, f"{model} timed out")

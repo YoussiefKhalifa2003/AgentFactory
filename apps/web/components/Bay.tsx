@@ -25,7 +25,7 @@ export function Bay({
   const [waiting, setWaiting] = useState(0);
   const state = live[agent.id];
   const activity = state?.job?.activity || "idle";
-  const liveNow = Boolean(state?.job) && !["done", "idle", "blocked"].includes(state.job?.status || activity);
+  const liveNow = Boolean(state?.job) && ["queued", "thinking", "tool"].includes(state.job?.status || "");
   const portrait = pfpSrc(agent.pfp) || badgeDataUrl(agent.name, agent.pigment);
 
   useEffect(() => {
