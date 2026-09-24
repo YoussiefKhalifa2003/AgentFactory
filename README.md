@@ -161,7 +161,7 @@ flowchart LR
 3. The harness may call tools, then salvage fences (HTML, mermaid, CSV, markdown) so a claimed file actually exists.
 4. Artifacts are collected at finish. **View** reads them from the API.
 
-Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. Spark, OpenRouter, and Zen are unconstrained (Spark’s gateway already queues extra chat slots). A second local job shows **Waiting for the local GPU…**
+Several desks can work at once. **Local Ollama is one generation at a time** so two huge models do not fight a 24GB GPU. Spark can run up to four desks together; a fifth waits for a Spark slot. OpenRouter and Zen are unconstrained. A second local job shows **Waiting for the local GPU…**
 
 ---
 

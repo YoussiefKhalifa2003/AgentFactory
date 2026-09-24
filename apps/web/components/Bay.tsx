@@ -20,7 +20,7 @@ export function Bay({
   agent: Agent;
   highlighted?: boolean;
 }) {
-  const { live, selectedId, assignWork, select } = useFactory();
+  const { live, selectedId, assignWork, select, taskTick } = useFactory();
   const [dropOver, setDropOver] = useState(false);
   const [waiting, setWaiting] = useState(0);
   const state = live[agent.id];
@@ -41,7 +41,7 @@ export function Bay({
     return () => {
       stop = true;
     };
-  }, [agent.id, liveNow]);
+  }, [agent.id, liveNow, taskTick]);
 
   function onDragOver(e: DragEvent) {
     const types = [...e.dataTransfer.types];

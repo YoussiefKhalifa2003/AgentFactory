@@ -39,7 +39,7 @@ export function ListsSidebar({
 }: {
   onDragStrength: (strength: Strength | null) => void;
 }) {
-  const { agents, assignWork, select, taskTick, setOpenListId } = useFactory();
+  const { agents, assignWork, select, selectedId, taskTick, setOpenListId } = useFactory();
   const [lists, setLists] = useState<TaskList[]>([]);
   const [openId, setOpenId] = useState<string>("inbox");
   const [items, setItems] = useState<ListItem[]>([]);
@@ -256,11 +256,18 @@ export function ListsSidebar({
 
   async function onItemClick(item: ListItem) {
     if (item.status === "open" || item.status === "blocked") {
-      const data = await assignWork({ itemId: item.id });
-      if (data && "queued" in data && data.queued) {
-        const target = pickBestAgent(agents, item.suggested);
-        if (target) select(target.id);
-      }
+      const desk = agents.find((a) => a.id === selectedId);
+      const fallback = pickBestAgent(agents, item.suggested);
+      const data = await assignWork({
+        itemId: item.id,
+        agentId: desk?.id || fallback?.id,
+      });
+      const fromApi =
+        data && typeof data === "object" && "agent" in data
+          ? (data as { agent?: { id?: string } }).agent?.id
+          : undefined;
+      const targetId = fromApi || desk?.id || fallback?.id;
+      if (targetId) select(targetId);
       return;
     }
     if (item.agent_id) select(item.agent_id);
@@ -473,7 +480,9 @@ export function ListsSidebar({
           {visible.map((item) => {
             const best = pickBestAgent(agents, item.suggested);
             const assigned = agents.find((a) => a.id === item.agent_id);
+            const desk = agents.find((a) => a.id === selectedId);
             const chosen = picked.includes(item.id);
+            const shown = assigned || desk || best;
             return (
               <article
                 key={item.id}
@@ -522,12 +531,12 @@ export function ListsSidebar({
                           ? "Needs attention"
                           : "On a desk"}
                   </span>
-                  {(assigned || best) && (
+                  {shown && (
                     <span
                       className="text-[11px] font-medium"
-                      style={{ color: (assigned || best)?.pigment || undefined }}
+                      style={{ color: shown.pigment || undefined }}
                     >
-                      {(assigned || best)?.name}
+                      {shown.name}
                     </span>
                   )}
                   {(item.status === "open" || item.status === "blocked") && (

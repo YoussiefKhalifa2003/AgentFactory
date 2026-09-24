@@ -145,6 +145,8 @@ _spark_until = 0.0
 _spark_ok = False
 # One Ollama generation at a time — a 4090 cannot hold two big local models.
 _gpu_lock = asyncio.Lock()
+# Spark's LiteLLM gateway has four chat slots. A fifth waits instead of hanging.
+_spark_slots = asyncio.Semaphore(4)
 
 
 def _entry(row: dict[str, str], available: bool) -> dict[str, Any]:
@@ -711,6 +713,7 @@ async def openai_chat_stream(
     on_token: TokenCb | None = None,
     on_think: TokenCb | None = None,
     max_tokens: int = 8192,
+    extra_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     url = base_url.rstrip("/")
     if not url.endswith("/v1"):
@@ -728,6 +731,8 @@ async def openai_chat_stream(
         "max_tokens": max_tokens,
         "stream": True,
     }
+    if extra_payload:
+        payload.update(extra_payload)
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -986,6 +991,7 @@ async def chat(
             tools=tools,
             timeout=300,
             max_tokens=16384,
+            extra_payload={"think": False, "reasoning_effort": "none"},
             on_token=on_token,
             on_think=on_think,
         )
@@ -1026,12 +1032,18 @@ async def complete_with_failover(
             last_error = zen.ZenError(401, f"{label} needs SPARK_API_KEY in .env")
             continue
         gpu_held = False
+        spark_held = False
         try:
             if provider == "local":
                 if _gpu_lock.locked() and on_caption:
                     on_caption("Waiting for the local GPU…")
                 await _gpu_lock.acquire()
                 gpu_held = True
+            if provider == "spark":
+                if _spark_slots.locked() and on_caption:
+                    on_caption("Waiting for Spark…")
+                await _spark_slots.acquire()
+                spark_held = True
             if on_caption:
                 on_caption(f"Working with {label}" if len(chain) > 1 and model_id != chain[0] else "Working")
 
@@ -1039,10 +1051,14 @@ async def complete_with_failover(
                 pulse_alive = True
 
                 async def beat() -> None:
+                    delay = 4.0 if provider == "spark" else 12.0
+                    note = "Spark is thinking…" if provider == "spark" else "Still working…"
                     try:
-                        await asyncio.sleep(12)
-                        if on_caption:
-                            on_caption("Still working…")
+                        while True:
+                            await asyncio.sleep(delay)
+                            if on_caption:
+                                on_caption(note)
+                            delay = min(delay + 4.0, 16.0)
                     except asyncio.CancelledError:
                         return
 
@@ -1103,6 +1119,8 @@ async def complete_with_failover(
         finally:
             if gpu_held:
                 _gpu_lock.release()
+            if spark_held:
+                _spark_slots.release()
     raise last_error or zen.ZenError(502, "No model could run this job")
 
 
