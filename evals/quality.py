@@ -99,14 +99,50 @@ def main() -> int:
             body="Cade wrote the parser in src/app.py",
             files=["src/app.py"],
         )
+        agents = db.list_agents()
+        ada = agents[0] if agents else None
+        now = db.utcnow()
+        if ada:
+            with db._lock:
+                con = db.connect()
+                con.execute("DELETE FROM jobs WHERE id IN ('floor-storm', 'floor-other')")
+                con.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, agent_id, prompt, status, activity, caption, output,
+                        created_at, updated_at, project_id
+                    ) VALUES (?, ?, ?, 'thinking', 'thinking', ?, '', ?, ?, ?)
+                    """,
+                    ("floor-storm", ada["id"], "x", "Stormcast floor check", now, now, storm["id"]),
+                )
+                con.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, agent_id, prompt, status, activity, caption, output,
+                        created_at, updated_at, project_id
+                    ) VALUES (?, ?, ?, 'thinking', 'thinking', ?, '', ?, ?, ?)
+                    """,
+                    ("floor-other", ada["id"], "y", "ERDC floor check", now, now, other["id"]),
+                )
+                con.commit()
+                con.close()
         agent = {"id": "hamza", "name": "Hamza", "strengths": ["writing"], "instructions": "", "description": ""}
         prompt = harness._system_prompt(agent, db.get_project(storm["id"]), "hamza-job")
         if "Project: Stormcast" not in prompt or "Earlier on this project" not in prompt or "Cade" not in prompt:
             print("stormcast prompt missing memory", prompt[:400])
             return 1
+        if "On the floor right now" not in prompt or "Stormcast floor check" not in prompt:
+            print("stormcast prompt missing floor recap", prompt[:400])
+            return 1
+        if "ERDC floor check" in prompt:
+            print("stormcast prompt saw the other floor")
+            return 1
         other_prompt = harness._system_prompt(agent, db.get_project(other["id"]), "")
         if "Cade" in other_prompt:
             print("other project saw Cade")
+            return 1
+        if "Stormcast floor check" in other_prompt:
+            print("other project saw Stormcast floor")
             return 1
         if repos.read_file(storm["id"], "../.env") != "error: path refused":
             print("path escape was allowed")
@@ -125,11 +161,56 @@ def main() -> int:
         if len(db.list_memories(storm["id"], limit=20)) != before:
             print("memory written without a project")
             return 1
+
+        agent_row = (db.list_agents() or [None])[0]
+        if agent_row:
+            job = db.create_job(agent_row["id"], "write a page")
+            ws = sandbox.workspace(agent_row["id"], job["id"])
+            sandbox.write_file(ws, "index.html", PAGE)
+            harness._collect_artifacts(job, agent_row, ws, lambda _p: None)
+            sandbox.write_file(ws, "index.html", PAGE + "<!-- again -->")
+            harness._collect_artifacts(job, agent_row, ws, lambda _p: None)
+            names = [row["name"] for row in db.list_artifacts(job["id"])]
+            if names.count("index.html") != 1 or not names:
+                print("artifact upsert failed", names)
+                return 1
+            with db._lock:
+                con = db.connect()
+                con.execute("DELETE FROM artifacts WHERE job_id=?", (job["id"],))
+                con.execute("DELETE FROM jobs WHERE id=?", (job["id"],))
+                con.commit()
+                con.close()
+            shutil.rmtree(ws, ignore_errors=True)
+
+        import chains as crew
+        import foreman as boss
+
+        src = sandbox.workspace("cade", "j-src")
+        sandbox.write_file(src, "plan.md", "1. research\n2. page")
+        sandbox.write_file(src, "pack.md", "notes")
+        crew.inherit_workspace("cade", "j-src", "hamza", "j-dst")
+        dest = sandbox.workspace("hamza", "j-dst")
+        if not (dest / "plan.md").exists() or not (dest / "pack.md").exists():
+            print("inherit missed files", list(dest.iterdir()) if dest.exists() else None)
+            return 1
+        shutil.rmtree(src, ignore_errors=True)
+        shutil.rmtree(dest, ignore_errors=True)
+
+        haiku = boss.plan("a haiku")
+        split = boss.plan("research X, a plan, and a page")
+        if len(haiku) != 1:
+            print("haiku should be one step", haiku)
+            return 1
+        strengths = [step["strength"] for step in split]
+        if strengths != ["research", "planning", "coding"]:
+            print("foreman split strengths", strengths)
+            return 1
     finally:
         db.delete_project(other["id"])
         with db._lock:
             con = db.connect()
             con.execute("DELETE FROM memories WHERE project_id=?", (storm["id"],))
+            con.execute("DELETE FROM jobs WHERE id IN ('floor-storm', 'floor-other')")
             con.commit()
             con.close()
         shutil.rmtree(repos.cache_dir(storm["id"]), ignore_errors=True)

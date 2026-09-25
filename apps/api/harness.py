@@ -205,7 +205,7 @@ def _system_prompt(agent: dict[str, Any], project: dict[str, Any] | None = None,
         import memory
         import repos
 
-        ready = repos.repo_root(project["id"]) is not None
+        ready = bool(repos.roots_for(project["id"]))
         cache = (
             "Code cache: ready"
             if ready
@@ -213,16 +213,34 @@ def _system_prompt(agent: dict[str, Any], project: dict[str, Any] | None = None,
         )
         tree = repos.tree_map(project["id"])
         earlier = memory.preamble(project["id"], job_id)
+        live = memory.floor_recap(project["id"], job_id)
+        title = project.get("title") or project.get("name") or "project"
+        org = project.get("organization") or ""
+        azure_project = project.get("project") or ""
+        azure_line = f"Azure: {org} / {azure_project}" if org else ""
         project_block = f"""
-Project: {project['name']}
+Project: {title}
+{azure_line}
 Branch: {project.get('branch') or 'main'}
 {cache}
 {tree}
 
 Search this repository before describing this product. Do not invent files or behavior.
 """
+        if live:
+            project_block += "\n" + live + "\n"
         if earlier:
             project_block += "\n" + earlier + "\n"
+    else:
+        live = ""
+        try:
+            import memory as _memory
+
+            live = _memory.floor_recap("", job_id)
+        except Exception:
+            live = ""
+        if live:
+            project_block = "\n" + live + "\n"
     return f"""You are {agent['name']}. You complete jobs.
 
 {agent.get('instructions') or ''}
@@ -377,7 +395,7 @@ def _parse_xml_tools(text: str) -> list[tuple[str, dict[str, str]]]:
     return found
 
 
-def _collect_artifacts(job: dict[str, Any], agent: dict[str, Any], ws: Path, broadcast: Broadcast) -> None:
+def _collect_artifacts(job: dict[str, Any], agent: dict[str, Any], ws: Path, broadcast: Broadcast) -> list[dict[str, Any]]:
     for path in sandbox.list_files(ws):
         full = ws / path
         suffix = full.suffix.lower()
@@ -405,7 +423,74 @@ def _collect_artifacts(job: dict[str, Any], agent: dict[str, Any], ws: Path, bro
         elif suffix in {".md", ".txt"}:
             kind = "report"
         art = db.add_artifact(job["id"], agent["id"], path, kind, str(full), mime)
-        broadcast({"type": "job.artifact", "jobId": job["id"], "artifact": art})
+        broadcast({"type": "job.artifact", "jobId": job["id"], "agentId": agent["id"], "artifact": art})
+    return db.list_artifacts(job["id"])
+
+
+def _best_view_artifact(job_id: str) -> dict[str, Any] | None:
+    arts = db.list_artifacts(job_id)
+    if not arts:
+        return None
+
+    def rank(row: dict[str, Any]) -> int:
+        name = str(row.get("name") or "").lower()
+        kind = str(row.get("kind") or "")
+        if kind == "site" or name.endswith((".html", ".htm")):
+            return 0
+        if name.endswith(".mmd"):
+            return 1
+        if kind == "sheet" or name.endswith(".csv"):
+            return 2
+        if kind == "pack" or name.endswith(".pdf"):
+            return 3
+        if name.endswith(".drawio"):
+            return 4
+        if kind == "plot" or name.endswith((".png", ".jpg", ".jpeg", ".svg", ".webp")):
+            return 5
+        return 9
+
+    viewable = [row for row in arts if rank(row) < 9]
+    if not viewable:
+        return None
+    viewable.sort(key=rank)
+    return viewable[0]
+
+
+def _auto_pin(job: dict[str, Any], agent: dict[str, Any]) -> None:
+    art = _best_view_artifact(job["id"])
+    if not art:
+        return
+    db.add_pin(
+        job_id=job["id"],
+        artifact_id=art["id"],
+        agent_id=agent["id"],
+        project_id=job.get("project_id"),
+        auto=True,
+    )
+
+
+def _wire(job: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    payload.setdefault("jobId", job.get("id"))
+    payload.setdefault("agentId", job.get("agent_id"))
+    payload["chain_id"] = job.get("chain_id")
+    payload["chain_step_id"] = job.get("chain_step_id")
+    return payload
+
+
+def _after_settle(job: dict[str, Any], status: str, broadcast: Broadcast) -> None:
+    try:
+        import shift as night
+
+        night.note_job(status, job.get("project_id"))
+    except Exception:
+        pass
+    if job.get("chain_id"):
+        try:
+            import chains
+
+            chains.after_job(job, status, broadcast)
+        except Exception:
+            pass
 
 
 def _read_quiet(ws: Path, rel: str) -> str:
@@ -614,6 +699,23 @@ async def _run_named_tool(
     result = await _call_tool(ws, name, args or {}, str(job.get("project_id") or ""))
     if name == "write_file":
         path = str(args.get("path") or "file")
+        arts = _collect_artifacts(job, agent, ws, broadcast)
+        match = next(
+            (row for row in arts if row.get("name") == path or str(row.get("name") or "").endswith(path)),
+            arts[-1] if arts else None,
+        )
+        if match:
+            broadcast(
+                {
+                    "type": "job.file",
+                    "jobId": job["id"],
+                    "agentId": agent["id"],
+                    "path": path,
+                    "artifact": match,
+                    "chain_id": job.get("chain_id"),
+                    "chain_step_id": job.get("chain_step_id"),
+                }
+            )
         _stream_text(
             broadcast,
             job["id"],
@@ -868,6 +970,8 @@ async def _complete_with_failover(
         on_caption=caption,
         on_token=on_token,
         on_think=on_think,
+        job_id=job_id,
+        agent_id=agent_id,
     )
 
 
@@ -876,6 +980,9 @@ def _message_from_choice(choice: dict[str, Any]) -> dict[str, Any]:
 
 
 def _touch_task(job_id: str, status: str, broadcast: Broadcast) -> None:
+    job = db.get_job(job_id) or {}
+    if job.get("chain_id") and status in {"done", "blocked", "cancelled"}:
+        return
     item = db.mark_item_for_job(job_id, status)
     if item:
         broadcast({"type": "task.updated", "item": item})
@@ -920,14 +1027,18 @@ def _settle_cancel(job_id: str, job: dict[str, Any], broadcast: Broadcast | None
         db.update_item(str(job["task_id"]), status="open", job_id=None)
     if broadcast:
         broadcast(
-            {
-                "type": "job.cancelled",
-                "jobId": job_id,
-                "agentId": job.get("agent_id"),
-                "caption": "Stopped",
-                "error": "Stopped from the desk",
-            }
+            _wire(
+                {**job, "id": job_id},
+                {
+                    "type": "job.cancelled",
+                    "jobId": job_id,
+                    "agentId": job.get("agent_id"),
+                    "caption": "Stopped",
+                    "error": "Stopped from the desk",
+                },
+            )
         )
+        _after_settle({**job, "id": job_id, "status": "cancelled"}, "cancelled", broadcast)
         _kick_next(str(job.get("agent_id") or ""), broadcast)
 
 
@@ -1069,15 +1180,18 @@ def _block_job(
         output=kept,
     )
     broadcast(
-        {
-            "type": "job.blocked",
-            "jobId": job_id,
-            "agentId": agent["id"],
-            "error": note,
-            "output": kept,
-            "activity": "blocked",
-            "caption": short,
-        }
+        _wire(
+            {**job, "id": job_id, "agent_id": agent["id"]},
+            {
+                "type": "job.blocked",
+                "jobId": job_id,
+                "agentId": agent["id"],
+                "error": note,
+                "output": kept,
+                "activity": "blocked",
+                "caption": short,
+            },
+        )
     )
     _touch_task(job_id, "blocked", broadcast)
     if kept.strip():
@@ -1088,6 +1202,7 @@ def _block_job(
         current["output"] = kept
         files = [row["name"] for row in db.list_artifacts(job_id)]
         memory.remember_job(current, agent, kept, files)
+    _after_settle({**job, "id": job_id, "agent_id": agent["id"], "output": kept, "status": "blocked"}, "blocked", broadcast)
     _kick_next(agent["id"], broadcast)
 
 
@@ -1177,19 +1292,27 @@ async def _finish(
         output,
         [row["name"] for row in db.list_artifacts(job_id)],
     )
+    try:
+        _auto_pin(done_job, agent)
+    except Exception:
+        pass
     broadcast(
-        {
-            "type": "job.done",
-            "jobId": job_id,
-            "agentId": agent["id"],
-            "activity": "done",
-            "caption": "Done",
-            "output": output,
-            "model": used_model,
-            "verify": note,
-        }
+        _wire(
+            done_job,
+            {
+                "type": "job.done",
+                "jobId": job_id,
+                "agentId": agent["id"],
+                "activity": "done",
+                "caption": "Done",
+                "output": output,
+                "model": used_model,
+                "verify": note,
+            },
+        )
     )
     _touch_task(job_id, "done", broadcast)
+    _after_settle(done_job, "done", broadcast)
     _kick_next(agent["id"], broadcast)
 
 
@@ -1210,13 +1333,16 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
 
     db.update_job(job_id, status="thinking", activity="thinking", caption="Working")
     broadcast(
-        {
-            "type": "job.started",
-            "jobId": job_id,
-            "agentId": agent["id"],
-            "activity": "thinking",
-            "caption": "Working",
-        }
+        _wire(
+            job,
+            {
+                "type": "job.started",
+                "jobId": job_id,
+                "agentId": agent["id"],
+                "activity": "thinking",
+                "caption": "Working",
+            },
+        )
     )
     _touch_task(job_id, "working", broadcast)
 

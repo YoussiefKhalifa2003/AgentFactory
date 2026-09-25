@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { API_URL, ListItem, Strength, TaskList, strengthLabel } from "@/lib/types";
+import { API_URL, ListItem, MemoryRow, Project, Strength, TaskList, strengthLabel } from "@/lib/types";
 import { pickBestAgent, TASK_MIME, taskDragPayload } from "@/lib/tasks";
 import { useFactory } from "@/lib/factory";
 
@@ -63,6 +63,11 @@ export function ListsSidebar({
     project: "",
     repository: "",
   });
+  const [shelf, setShelf] = useState<Project[]>([]);
+  const [ledger, setLedger] = useState<MemoryRow[]>([]);
+  const [crewFor, setCrewFor] = useState<string | null>(null);
+  const [crewIds, setCrewIds] = useState<string[]>([]);
+  const [splitBusy, setSplitBusy] = useState(false);
 
   const openList = lists.find((l) => l.id === openId) || null;
   const isMeeting = openList?.kind === "meeting";
@@ -95,9 +100,22 @@ export function ListsSidebar({
     }
   }
 
+  async function loadShelf() {
+    try {
+      const rows = (await fetch(`${API_URL}/api/projects`).then((r) => r.json())) as Project[];
+      setShelf(Array.isArray(rows) ? rows : []);
+    } catch {
+      setShelf([]);
+    }
+  }
+
   useEffect(() => {
     loadLists();
-    const timer = window.setInterval(loadLists, 20000);
+    loadShelf();
+    const timer = window.setInterval(() => {
+      loadLists();
+      loadShelf();
+    }, 20000);
     return () => window.clearInterval(timer);
   }, [taskTick]);
 
@@ -112,6 +130,26 @@ export function ListsSidebar({
   useEffect(() => {
     loadItems(openId);
   }, [openId, taskTick]);
+
+  useEffect(() => {
+    const projectId = openList?.project?.id;
+    if (!projectId) {
+      setLedger([]);
+      return;
+    }
+    let stop = false;
+    fetch(`${API_URL}/api/projects/${projectId}/memory?limit=3`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (!stop) setLedger(Array.isArray(data.items) ? data.items.slice(0, 3) : []);
+      })
+      .catch(() => {
+        if (!stop) setLedger([]);
+      });
+    return () => {
+      stop = true;
+    };
+  }, [openList?.project?.id, taskTick]);
 
   const visible = useMemo(() => {
     const base = isMeeting && mine ? items.filter((item) => item.mine) : items;
@@ -189,6 +227,23 @@ export function ListsSidebar({
     setLinking(false);
     setLinkError(null);
     setRepoUrl("");
+    await loadLists();
+    await loadShelf();
+  }
+
+  async function attachExisting(projectId: string) {
+    if (!openId) return;
+    const patched = await fetch(`${API_URL}/api/lists/${openId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId }),
+    });
+    if (!patched.ok) {
+      setLinkError("Could not link that list.");
+      return;
+    }
+    setLinking(false);
+    setLinkError(null);
     await loadLists();
   }
 
@@ -273,6 +328,34 @@ export function ListsSidebar({
     if (item.agent_id) select(item.agent_id);
   }
 
+  async function assignCrew(item: ListItem) {
+    const steps = crewIds
+      .map((id) => agents.find((a) => a.id === id))
+      .filter(Boolean)
+      .slice(0, 4)
+      .map((agent) => ({
+        agent_id: agent!.id,
+        strength: agent!.strengths[0] || "ops",
+      }));
+    if (!steps.length) return;
+    const data = await assignWork({ itemId: item.id, chain: steps });
+    const first = steps[0]?.agent_id;
+    if (first) select(first);
+    setCrewFor(null);
+    setCrewIds([]);
+    return data;
+  }
+
+  async function splitItem(item: ListItem) {
+    if (splitBusy) return;
+    setSplitBusy(true);
+    try {
+      await assignWork({ itemId: item.id, foreman: true });
+    } finally {
+      setSplitBusy(false);
+    }
+  }
+
   return (
     <aside className="flex h-full min-h-0 w-[320px] shrink-0 flex-col overflow-hidden rounded-[28px] bg-white/70">
       <div className="flex shrink-0 items-center justify-between px-5 py-4">
@@ -298,6 +381,43 @@ export function ListsSidebar({
 
       <div className="min-h-0 flex-[0.42] overflow-auto">
         {error && <p className="px-5 py-3 text-sm text-[#b42318]">{error}</p>}
+        {shelf.length > 0 && (
+          <div className="px-3 pb-2">
+            {shelf.map((project) => (
+              <div key={project.id} className="mb-1 flex w-full items-center gap-2 rounded-2xl bg-white px-3 py-2">
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 text-left"
+                  onClick={() => {
+                    if (!openList?.project) attachExisting(project.id);
+                  }}
+                >
+                  <span className="block truncate text-sm font-medium">{project.title || project.name}</span>
+                  <span className="text-[11px] text-[var(--ink-soft)]">
+                    {project.repos?.length || 1} repo{(project.repos?.length || 1) === 1 ? "" : "s"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="shrink-0 text-[11px] text-[var(--ink-soft)] underline"
+                  disabled={syncing}
+                  onClick={async () => {
+                    setSyncing(true);
+                    try {
+                      await fetch(`${API_URL}/api/projects/${project.id}/sync`, { method: "POST" });
+                      await loadShelf();
+                      await loadLists();
+                    } finally {
+                      setSyncing(false);
+                    }
+                  }}
+                >
+                  Sync
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {yours.map((list) => (
           <ListRow
             key={list.id}
@@ -356,7 +476,9 @@ export function ListsSidebar({
             <>
               <p className="min-w-0 truncate text-[11px] text-[var(--ink-soft)]">
                 {openList?.project
-                  ? `${openList.project.name}${openList.project.branch ? ` · ${openList.project.branch}` : ""}`
+                  ? `${openList.project.title || openList.project.name}${
+                      openList.project.repos?.length ? ` · ${openList.project.repos.length} repo` : ""
+                    }${openList.project.branch ? ` · ${openList.project.branch}` : ""}`
                   : ""}
               </p>
               <div className="flex shrink-0 items-center gap-3">
@@ -396,10 +518,33 @@ export function ListsSidebar({
         {openList?.project?.sync_error && (
           <p className="px-5 pb-2 pl-11 text-xs text-[#b42318]">{openList.project.sync_error}</p>
         )}
+        {ledger.length > 0 && (
+          <div className="px-4 pb-2">
+            {ledger.map((row) => (
+              <p key={row.id} className="truncate text-[11px] text-[var(--ink-soft)]">
+                {row.agent_name}: {row.task}
+              </p>
+            ))}
+          </div>
+        )}
         {linking && !openList?.project && (
           <form onSubmit={saveLink} className="mx-4 mb-3 shrink-0 rounded-2xl bg-white px-3 py-3">
             <p className="text-sm">Paste the repository link</p>
             {linkError && <p className="mt-1 text-xs text-[#b42318]">{linkError}</p>}
+            {shelf.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {shelf.map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    className="rounded-full bg-[var(--paper)] px-2.5 py-1 text-[11px]"
+                    onClick={() => attachExisting(project.id)}
+                  >
+                    {project.title || project.name}
+                  </button>
+                ))}
+              </div>
+            )}
             <p className="mt-1 text-[11px] leading-4 text-[var(--ink-soft)]">
               In Azure DevOps, open the repo and copy the address bar. It looks like
               dev.azure.com/your-company/Stormcast/_git/Stormcast
@@ -540,18 +685,76 @@ export function ListsSidebar({
                     </span>
                   )}
                   {(item.status === "open" || item.status === "blocked") && (
-                    <button
-                      type="button"
-                      className="text-[11px] text-[var(--ink-soft)] underline"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onItemClick(item);
-                      }}
-                    >
-                      Assign
-                    </button>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        className="text-[11px] text-[var(--ink-soft)] underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onItemClick(item);
+                        }}
+                      >
+                        Assign
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[11px] text-[var(--ink-soft)] underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCrewFor((cur) => (cur === item.id ? null : item.id));
+                        }}
+                      >
+                        Crew
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[11px] text-[var(--ink-soft)] underline"
+                        disabled={splitBusy}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          splitItem(item);
+                        }}
+                      >
+                        Let the floor split it
+                      </button>
+                    </div>
                   )}
                 </div>
+                {crewFor === item.id && (item.status === "open" || item.status === "blocked") && (
+                  <div className="mt-2 pl-11">
+                    <p className="text-[11px] text-[var(--ink-soft)]">Crew, in order — up to four desks</p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {agents.map((agent) => {
+                        const on = crewIds.includes(agent.id);
+                        return (
+                          <button
+                            key={agent.id}
+                            type="button"
+                            className={`rounded-full px-2 py-0.5 text-[11px] ${on ? "bg-[var(--ink)] text-white" : "bg-white"}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setCrewIds((cur) =>
+                                on ? cur.filter((id) => id !== agent.id) : cur.length >= 4 ? cur : [...cur, agent.id]
+                              );
+                            }}
+                          >
+                            {agent.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      className="mt-2 text-[11px] underline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        assignCrew(item);
+                      }}
+                    >
+                      Hand to crew
+                    </button>
+                  </div>
+                )}
               </article>
             );
           })}
@@ -592,6 +795,11 @@ function ListRow({
     >
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 px-2 py-2.5 text-left">
         <span className="block truncate text-sm font-medium">{list.title}</span>
+        {list.project && (
+          <span className="mt-0.5 block truncate text-[11px] text-[var(--ink-soft)]">
+            {list.project.title || list.project.name}
+          </span>
+        )}
       </button>
       {onCode && (
         <button type="button" className="shrink-0 text-[11px] text-[var(--ink-soft)]" onClick={onCode}>

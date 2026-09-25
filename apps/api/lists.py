@@ -36,7 +36,7 @@ def _project_prompt(item: dict[str, Any]) -> tuple[str, str | None]:
     project = db.get_project(project_id)
     if not project:
         return prompt, None
-    marker = f"This task is on the {project['name']} project."
+    marker = f"This task is on the {project.get('title') or project['name']} project."
     if marker not in prompt:
         prompt = prompt.rstrip() + "\n" + marker
     return prompt, project_id
@@ -156,6 +156,8 @@ def assign(
     list_id: str | None = None,
     text: str | None = None,
     agent_id: str | None = None,
+    chain: list[dict[str, Any]] | None = None,
+    foreman: bool = False,
 ) -> dict[str, Any]:
     item = db.get_item(item_id) if item_id else None
     if item is None and text:
@@ -172,6 +174,27 @@ def assign(
         if job and job["status"] in {"queued", "thinking", "tool"}:
             agent = db.get_agent(job["agent_id"])
             return {"item": item, "job": job, "agent": agent, "queued": False}
+
+    if chain:
+        import chains as crew
+
+        return crew.start_from_assign(item, [dict(step) for step in chain], created_by="user")
+
+    if foreman:
+        import chains as crew
+        import foreman as boss
+
+        steps = boss.plan(item.get("text") or item.get("prompt") or "")
+        if len(steps) >= 2:
+            result = crew.start_from_assign(item, steps, created_by="foreman")
+            caption = boss.caption_for(steps)
+            result["caption"] = caption
+            if caption and result.get("chain"):
+                db.update_chain(result["chain"]["id"], title=caption)
+                result["chain"] = db.get_chain(result["chain"]["id"])
+            return result
+        if steps:
+            agent_id = steps[0].get("agent_id") or agent_id
 
     suggested = item.get("suggested") or "coding"
     agent = db.get_agent(agent_id) if agent_id else pick_best_agent(suggested)

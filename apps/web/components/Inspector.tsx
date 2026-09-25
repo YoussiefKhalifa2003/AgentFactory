@@ -321,11 +321,12 @@ function DrawioEmbed({ xml }: { xml: string }) {
 }
 
 function previewSrc(jobId: string, file: Artifact) {
+  const stamp = file.created_at || file.id;
   if (isHtmlFile(file)) {
     const rel = file.name.replace(/^\/+/, "") || "index.html";
-    return `${API_URL}/api/jobs/${jobId}/site/${rel}`;
+    return `${API_URL}/api/jobs/${jobId}/site/${rel}?v=${encodeURIComponent(stamp)}`;
   }
-  return `${API_URL}/api/artifacts/${file.id}/file`;
+  return `${API_URL}/api/artifacts/${file.id}/file?v=${encodeURIComponent(stamp)}`;
 }
 
 function downloadSrc(file: Artifact) {
@@ -342,6 +343,7 @@ function FilePreview({
   onClose: () => void;
 }) {
   const [text, setText] = useState<string | null>(null);
+  const [src, setSrc] = useState(previewSrc(jobId, file));
   const frameRef = useRef<HTMLIFrameElement>(null);
   const html = isHtmlFile(file);
   const image = isImageFile(file);
@@ -349,7 +351,13 @@ function FilePreview({
   const mermaid = isMermaidFile(file);
   const sheet = isSheetFile(file);
   const pdf = isPdfFile(file);
-  const pageUrl = html ? previewSrc(jobId, file) : "";
+  const pageUrl = html ? src : "";
+
+  useEffect(() => {
+    const next = previewSrc(jobId, file);
+    const timer = window.setTimeout(() => setSrc(next), 800);
+    return () => window.clearTimeout(timer);
+  }, [jobId, file.id, file.created_at, file.name, file.kind]);
 
   useEffect(() => {
     if (html || image || pdf) return;
@@ -425,7 +433,7 @@ function FilePreview({
             <iframe
               ref={frameRef}
               title={file.name}
-              src={pageUrl}
+              src={src}
               className="block h-[min(82vh,920px)] min-h-[480px] w-full border-0 bg-black"
               style={{ pointerEvents: "auto" }}
               allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write"
@@ -435,14 +443,14 @@ function FilePreview({
             />
           ) : image ? (
             <img
-              src={previewSrc(jobId, file)}
+              src={src}
               alt={file.name}
               className="mx-auto max-h-[70vh] object-contain p-4"
             />
           ) : pdf ? (
             <iframe
               title={file.name}
-              src={previewSrc(jobId, file)}
+              src={src}
               className="h-[70vh] w-full border-0"
             />
           ) : mermaid && text && !text.startsWith("Couldn't") ? (
@@ -477,13 +485,16 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     updateAgent,
     setAgents,
     taskTick,
+    chains,
+    preview: pinPreview,
+    openPreview,
+    closePreview,
   } = useFactory();
   const agent = agents.find((a) => a.id === selectedId) || agents[0];
   const { tools } = useSkillCatalog();
   const state = agent ? live[agent.id] : undefined;
   const [prompt, setPrompt] = useState("");
   const [deleting, setDeleting] = useState(false);
-  const [preview, setPreview] = useState<{ jobId: string; file: Artifact } | null>(null);
   const [tray, setTray] = useState<ListItem[]>([]);
   const [showEarlier, setShowEarlier] = useState(false);
   const [handError, setHandError] = useState<string | null>(null);
@@ -822,6 +833,12 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
               {item.project_name && (
                 <p className="text-[11px] text-[var(--ink-soft)]">{item.project_name}</p>
               )}
+              {item.chain_id && chains[item.chain_id] && (
+                <p className="text-[11px] text-[var(--ink-soft)]">
+                  {chains[item.chain_id].steps.find((s) => s.id === item.chain_step_id)?.seq || 1} of{" "}
+                  {chains[item.chain_id].steps.length}
+                </p>
+              )}
               {(reply || active) && (
                 <div className="text-sm">
                   {reply ? (
@@ -847,7 +864,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                     <button
                       type="button"
                       className="btn btn-solid px-3 py-1 text-xs"
-                      onClick={() => setPreview({ jobId: item.id, file: viewFile })}
+                      onClick={() => openPreview(item.id, viewFile)}
                     >
                       View
                     </button>
@@ -862,7 +879,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                       key={a.id}
                       type="button"
                       className="text-[11px] text-[var(--ink-soft)] underline"
-                      onClick={() => setPreview({ jobId: item.id, file: a })}
+                      onClick={() => openPreview(item.id, a)}
                     >
                       {fileKindLabel(a)}
                     </button>
@@ -891,11 +908,15 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         })}
       </div>
 
-      {preview && (
+      {pinPreview && (
         <FilePreview
-          jobId={preview.jobId}
-          file={preview.file}
-          onClose={() => setPreview(null)}
+          jobId={pinPreview.jobId}
+          file={
+            (state?.artifacts || []).find(
+              (a) => a.id === pinPreview.file.id || a.name === pinPreview.file.name
+            ) || pinPreview.file
+          }
+          onClose={closePreview}
         />
       )}
 

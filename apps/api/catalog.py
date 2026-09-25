@@ -370,7 +370,10 @@ async def refresh_spark2() -> bool:
     if _spark2_until > now:
         return _spark2_ok
     ok = False
-    if SPARK2_KEY and SPARK2_BASE:
+    reason = "unreachable"
+    if not SPARK2_KEY:
+        reason = "key missing"
+    elif SPARK2_BASE:
         try:
             async with httpx.AsyncClient(timeout=4.0) as client:
                 r = await client.get(
@@ -378,10 +381,21 @@ async def refresh_spark2() -> bool:
                     headers={"Authorization": f"Bearer {SPARK2_KEY}"},
                 )
                 ok = r.status_code < 400
+                if r.status_code in {401, 403}:
+                    reason = "key rejected"
+                elif not ok:
+                    reason = "unreachable"
         except httpx.HTTPError:
             ok = False
+            reason = "unreachable"
     _spark2_ok = ok
     _spark2_until = now + (20 if ok else 60)
+    try:
+        import plant
+
+        plant.set_spark2(ok, reason)
+    except Exception:
+        pass
     return ok
 
 
@@ -1073,6 +1087,8 @@ async def complete_with_failover(
     on_caption: Caption | None = None,
     on_token: TokenCb | None = None,
     on_think: TokenCb | None = None,
+    job_id: str = "",
+    agent_id: str = "",
 ) -> tuple[dict[str, Any], str]:
     await refresh_local()
     await refresh_spark()
@@ -1090,12 +1106,17 @@ async def complete_with_failover(
             continue
         gpu_held = False
         spark_box = ""
+        cloud_held = False
         try:
             if provider == "local":
                 if _gpu_lock.locked() and on_caption:
                     on_caption("Waiting for the local GPU…")
                 await _gpu_lock.acquire()
                 gpu_held = True
+                if job_id:
+                    import plant
+
+                    plant.hold_local(job_id, agent_id, model_id)
             if provider == "spark":
                 claimed = await claim_spark_box()
                 if not claimed:
@@ -1104,6 +1125,15 @@ async def complete_with_failover(
                     last_error = zen.ZenError(429, "Spark is busy")
                     continue
                 spark_box = claimed
+                if job_id:
+                    import plant
+
+                    plant.hold_spark(spark_box, job_id, agent_id)
+            if provider in {"openrouter", "zen"} and job_id:
+                import plant
+
+                plant.hold_cloud(job_id, provider)
+                cloud_held = True
             if on_caption:
                 if spark_box and _spark_v1(spark_box) != _spark_v1(SPARK_BASE):
                     on_caption("Working on Spark 2")
@@ -1185,8 +1215,20 @@ async def complete_with_failover(
         finally:
             if gpu_held:
                 _gpu_lock.release()
+                if job_id:
+                    import plant
+
+                    plant.release_local(job_id)
             if spark_box:
                 await release_spark_box(spark_box)
+                if job_id:
+                    import plant
+
+                    plant.release_spark(spark_box)
+            if cloud_held and job_id:
+                import plant
+
+                plant.release_cloud(job_id)
     raise last_error or zen.ZenError(502, "No model could run this job")
 
 

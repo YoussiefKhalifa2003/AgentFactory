@@ -142,7 +142,89 @@ def init_db() -> list[str]:
         _ensure_column(con, "jobs", "task_id", "TEXT")
         _ensure_column(con, "jobs", "model", "TEXT")
         _ensure_column(con, "jobs", "project_id", "TEXT")
+        _ensure_column(con, "jobs", "chain_id", "TEXT")
+        _ensure_column(con, "jobs", "chain_step_id", "TEXT")
         _ensure_column(con, "lists", "project_id", "TEXT")
+        _ensure_column(con, "projects", "title", "TEXT")
+        _ensure_column(con, "memories", "kind", "TEXT")
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS project_repos (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                label TEXT NOT NULL DEFAULT 'app',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            );
+            CREATE TABLE IF NOT EXISTS chains (
+                id TEXT PRIMARY KEY,
+                list_id TEXT,
+                item_id TEXT,
+                project_id TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chain_steps (
+                id TEXT PRIMARY KEY,
+                chain_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                agent_id TEXT,
+                strength TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                depends_on INTEGER,
+                inherit INTEGER NOT NULL DEFAULT 1,
+                job_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(chain_id) REFERENCES chains(id)
+            );
+            CREATE TABLE IF NOT EXISTS pins (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                job_id TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                auto INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS shifts (
+                id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                mode TEXT NOT NULL DEFAULT 'manual',
+                note TEXT NOT NULL DEFAULT '',
+                jobs_started INTEGER NOT NULL DEFAULT 0,
+                jobs_done INTEGER NOT NULL DEFAULT 0,
+                jobs_blocked INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_chain_steps_chain ON chain_steps(chain_id, seq);
+            CREATE INDEX IF NOT EXISTS idx_jobs_chain ON jobs(chain_id);
+            CREATE INDEX IF NOT EXISTS idx_pins_project ON pins(project_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id, created_at);
+            """
+        )
+        con.execute("UPDATE projects SET title = name WHERE title IS NULL OR title = ''")
+        con.execute("UPDATE memories SET kind = 'job' WHERE kind IS NULL OR kind = ''")
+        now = utcnow()
+        for row in con.execute("SELECT id, repository, branch FROM projects").fetchall():
+            exists = con.execute(
+                "SELECT id FROM project_repos WHERE project_id=? LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            if exists:
+                continue
+            con.execute(
+                """
+                INSERT INTO project_repos (id, project_id, repository, branch, label, created_at)
+                VALUES (?, ?, ?, ?, 'app', ?)
+                """,
+                (f"{row['id']}-default", row["id"], row["repository"], row["branch"] or "main", now),
+            )
         con.commit()
         con.close()
     seed_starters()
@@ -443,6 +525,7 @@ def add_artifact(
         "kind": kind,
         "path": path,
         "mime": mime,
+        "created_at": now,
     }
 
 
@@ -538,8 +621,20 @@ def remap_free_models() -> None:
         update_agent(agent["id"], {"model": catalog.default_model_id()})
 
 
+def get_artifact(artifact_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
 def claim_or_queue(
-    agent_id: str, item_id: str, prompt: str, project_id: str | None = None
+    agent_id: str,
+    item_id: str,
+    prompt: str,
+    project_id: str | None = None,
+    chain_id: str | None = None,
+    chain_step_id: str | None = None,
 ) -> dict[str, Any]:
     """Start a job, or park the item, in one transaction so a desk cannot double-book."""
     job_id = str(uuid.uuid4())
@@ -571,11 +666,11 @@ def claim_or_queue(
             """
             INSERT INTO jobs (
                 id, agent_id, prompt, status, activity, caption, output,
-                created_at, updated_at, task_id, project_id
+                created_at, updated_at, task_id, project_id, chain_id, chain_step_id
             )
-            VALUES (?, ?, ?, 'queued', 'idle', 'Queued on the floor', '', ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'queued', 'idle', 'Queued on the floor', '', ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, agent_id, prompt, now, now, item_id, project_id),
+            (job_id, agent_id, prompt, now, now, item_id, project_id, chain_id, chain_step_id),
         )
         con.execute(
             """
@@ -862,10 +957,12 @@ def _public_project(project_id: str | None) -> dict[str, Any] | None:
         return None
     return {
         "id": row["id"],
-        "name": row["name"],
+        "name": row.get("title") or row["name"],
+        "title": row.get("title") or row["name"],
         "branch": row["branch"],
         "synced_at": row.get("synced_at"),
         "sync_error": row.get("sync_error"),
+        "repos": row.get("repos") or [],
     }
 
 
@@ -873,13 +970,14 @@ def create_project(payload: dict[str, Any]) -> dict[str, Any]:
     project_id = str(uuid.uuid4())
     now = utcnow()
     branch = (payload.get("branch") or "main").strip() or "main"
+    title = (payload.get("title") or payload["name"]).strip()
     with _lock:
         con = connect()
         con.execute(
             """
             INSERT INTO projects (
-                id, name, organization, project, repository, branch, synced_at, sync_error, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                id, name, organization, project, repository, branch, title, synced_at, sync_error, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
             """,
             (
                 project_id,
@@ -888,8 +986,16 @@ def create_project(payload: dict[str, Any]) -> dict[str, Any]:
                 payload["project"].strip(),
                 payload["repository"].strip(),
                 branch,
+                title,
                 now,
             ),
+        )
+        con.execute(
+            """
+            INSERT INTO project_repos (id, project_id, repository, branch, label, created_at)
+            VALUES (?, ?, ?, ?, 'app', ?)
+            """,
+            (f"{project_id}-default", project_id, payload["repository"].strip(), branch, now),
         )
         con.commit()
         con.close()
@@ -902,14 +1008,25 @@ def get_project(project_id: str) -> dict[str, Any] | None:
     con = connect()
     row = con.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     con.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+    data = dict(row)
+    data["title"] = data.get("title") or data.get("name")
+    data["repos"] = list_project_repos(project_id)
+    return data
 
 
 def list_projects() -> list[dict[str, Any]]:
     con = connect()
     rows = con.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
     con.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        item = dict(r)
+        item["title"] = item.get("title") or item.get("name")
+        item["repos"] = list_project_repos(item["id"])
+        out.append(item)
+    return out
 
 
 def update_project(project_id: str, **fields: Any) -> dict[str, Any] | None:
@@ -939,6 +1056,9 @@ def delete_project(project_id: str) -> bool:
         return False
     with _lock:
         con = connect()
+        con.execute("DELETE FROM pins WHERE project_id=?", (project_id,))
+        con.execute("DELETE FROM memories WHERE project_id=?", (project_id,))
+        con.execute("DELETE FROM project_repos WHERE project_id=?", (project_id,))
         con.execute("DELETE FROM projects WHERE id=?", (project_id,))
         con.commit()
         con.close()
@@ -963,6 +1083,7 @@ def remember(
     status: str,
     body: str,
     files: list[str],
+    kind: str = "job",
 ) -> None:
     now = utcnow()
     with _lock:
@@ -971,8 +1092,8 @@ def remember(
         con.execute(
             """
             INSERT INTO memories (
-                id, project_id, job_id, agent_id, agent_name, task, status, body, files, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, project_id, job_id, agent_id, agent_name, task, status, body, files, created_at, kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(uuid.uuid4()),
@@ -985,6 +1106,7 @@ def remember(
                 body[:2500],
                 json.dumps(files),
                 now,
+                kind or "job",
             ),
         )
         con.commit()
@@ -1024,3 +1146,301 @@ def search_memories(project_id: str, query: str, limit: int = 5) -> list[dict[st
         if len(hits) >= limit:
             break
     return hits
+
+
+def list_project_repos(project_id: str) -> list[dict[str, Any]]:
+    con = connect()
+    rows = con.execute(
+        "SELECT * FROM project_repos WHERE project_id=? ORDER BY created_at",
+        (project_id,),
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def add_project_repo(
+    project_id: str, repository: str, branch: str = "main", label: str = "app"
+) -> dict[str, Any]:
+    repo_id = str(uuid.uuid4())
+    now = utcnow()
+    branch = (branch or "main").strip() or "main"
+    label = (label or "app").strip() or "app"
+    with _lock:
+        con = connect()
+        con.execute(
+            """
+            INSERT INTO project_repos (id, project_id, repository, branch, label, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (repo_id, project_id, repository.strip(), branch, label, now),
+        )
+        con.commit()
+        con.close()
+    return {
+        "id": repo_id,
+        "project_id": project_id,
+        "repository": repository.strip(),
+        "branch": branch,
+        "label": label,
+        "created_at": now,
+    }
+
+
+def get_project_repo(repo_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM project_repos WHERE id=?", (repo_id,)).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def default_repo_id(project_id: str) -> str | None:
+    rows = list_project_repos(project_id)
+    if not rows:
+        return None
+    for row in rows:
+        if row["id"] == f"{project_id}-default" or row.get("label") == "app":
+            return row["id"]
+    return rows[0]["id"]
+
+
+def list_open_chains() -> list[dict[str, Any]]:
+    con = connect()
+    rows = con.execute(
+        "SELECT * FROM chains WHERE status IN ('pending', 'running') ORDER BY created_at"
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def get_chain(chain_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM chains WHERE id=?", (chain_id,)).fetchone()
+    if not row:
+        con.close()
+        return None
+    steps = con.execute(
+        "SELECT * FROM chain_steps WHERE chain_id=? ORDER BY seq", (chain_id,)
+    ).fetchall()
+    con.close()
+    data = dict(row)
+    data["steps"] = [dict(s) for s in steps]
+    return data
+
+
+def create_chain(payload: dict[str, Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
+    chain_id = str(uuid.uuid4())
+    now = utcnow()
+    with _lock:
+        con = connect()
+        con.execute(
+            """
+            INSERT INTO chains (
+                id, list_id, item_id, project_id, title, status, created_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            (
+                chain_id,
+                payload.get("list_id"),
+                payload.get("item_id"),
+                payload.get("project_id"),
+                payload.get("title") or "",
+                payload.get("created_by") or "user",
+                now,
+                now,
+            ),
+        )
+        for i, step in enumerate(steps, start=1):
+            depends = step.get("depends_on")
+            if depends is None and i > 1:
+                depends = i - 1
+            con.execute(
+                """
+                INSERT INTO chain_steps (
+                    id, chain_id, seq, agent_id, strength, prompt, depends_on, inherit, job_id, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    chain_id,
+                    i,
+                    step.get("agent_id"),
+                    step["strength"],
+                    step["prompt"],
+                    depends,
+                    1 if step.get("inherit", True) else 0,
+                    now,
+                ),
+            )
+        con.commit()
+        con.close()
+    row = get_chain(chain_id)
+    assert row
+    return row
+
+
+def update_chain(chain_id: str, **fields: Any) -> dict[str, Any] | None:
+    fields["updated_at"] = utcnow()
+    keys = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [chain_id]
+    with _lock:
+        con = connect()
+        con.execute(f"UPDATE chains SET {keys} WHERE id=?", vals)
+        con.commit()
+        con.close()
+    return get_chain(chain_id)
+
+
+def update_chain_step(step_id: str, **fields: Any) -> dict[str, Any] | None:
+    keys = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [step_id]
+    with _lock:
+        con = connect()
+        con.execute(f"UPDATE chain_steps SET {keys} WHERE id=?", vals)
+        con.commit()
+        row = con.execute("SELECT * FROM chain_steps WHERE id=?", (step_id,)).fetchone()
+        con.close()
+    return dict(row) if row else None
+
+
+def get_chain_step(step_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM chain_steps WHERE id=?", (step_id,)).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def step_for_job(job_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM chain_steps WHERE job_id=?", (job_id,)).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def list_pins(limit: int = 24) -> list[dict[str, Any]]:
+    con = connect()
+    rows = con.execute(
+        "SELECT * FROM pins ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def get_pin(pin_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM pins WHERE id=?", (pin_id,)).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def add_pin(
+    *,
+    job_id: str,
+    artifact_id: str,
+    agent_id: str,
+    project_id: str | None,
+    auto: bool,
+) -> dict[str, Any]:
+    now = utcnow()
+    with _lock:
+        con = connect()
+        if auto:
+            con.execute("DELETE FROM pins WHERE job_id=? AND auto=1", (job_id,))
+            autos = con.execute("SELECT id FROM pins WHERE auto=1 ORDER BY created_at").fetchall()
+            overflow = len(autos) - 11
+            if overflow > 0:
+                for row in autos[:overflow]:
+                    con.execute("DELETE FROM pins WHERE id=?", (row["id"],))
+        pin_id = str(uuid.uuid4())
+        con.execute(
+            """
+            INSERT INTO pins (id, project_id, job_id, artifact_id, agent_id, auto, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (pin_id, project_id, job_id, artifact_id, agent_id, 1 if auto else 0, now),
+        )
+        con.commit()
+        con.close()
+    row = get_pin(pin_id)
+    assert row
+    return row
+
+
+def delete_pin(pin_id: str) -> bool:
+    with _lock:
+        con = connect()
+        cur = con.execute("DELETE FROM pins WHERE id=?", (pin_id,))
+        con.commit()
+        con.close()
+    return cur.rowcount > 0
+
+
+def open_shift() -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM shifts WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1").fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def latest_shift() -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM shifts ORDER BY started_at DESC LIMIT 1").fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def create_shift(mode: str = "manual") -> dict[str, Any]:
+    shift_id = str(uuid.uuid4())
+    now = utcnow()
+    with _lock:
+        con = connect()
+        con.execute(
+            """
+            INSERT INTO shifts (id, started_at, ended_at, mode, note, jobs_started, jobs_done, jobs_blocked)
+            VALUES (?, ?, NULL, ?, '', 0, 0, 0)
+            """,
+            (shift_id, now, mode),
+        )
+        con.commit()
+        con.close()
+    row = latest_shift()
+    assert row
+    return row
+
+
+def update_shift(shift_id: str, **fields: Any) -> dict[str, Any] | None:
+    keys = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [shift_id]
+    with _lock:
+        con = connect()
+        con.execute(f"UPDATE shifts SET {keys} WHERE id=?", vals)
+        con.commit()
+        row = con.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+        con.close()
+    return dict(row) if row else None
+
+
+def get_shift(shift_id: str) -> dict[str, Any] | None:
+    con = connect()
+    row = con.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def showroom_cards(limit: int = 24) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for pin in list_pins(limit):
+        art = get_artifact(pin["artifact_id"])
+        job = get_job(pin["job_id"])
+        agent = get_agent(pin["agent_id"])
+        project = get_project(str(pin["project_id"])) if pin.get("project_id") else None
+        cards.append(
+            {
+                **pin,
+                "artifact": art,
+                "agent_name": (agent or {}).get("name") or pin.get("agent_id"),
+                "caption": (job or {}).get("caption") or (job or {}).get("prompt") or "",
+                "project_title": (project or {}).get("title") or (project or {}).get("name"),
+            }
+        )
+    return cards

@@ -116,10 +116,36 @@ class ProjectIn(BaseModel):
     project: str
     repository: str
     branch: str = "main"
+    title: str | None = None
+
+
+class RepoIn(BaseModel):
+    repository: str
+    branch: str = "main"
+    label: str = "app"
+
+
+class PinIn(BaseModel):
+    job_id: str
+    artifact_id: str
+    agent_id: str | None = None
+    project_id: str | None = None
+
+
+class ShiftIn(BaseModel):
+    cap: int = 8
 
 
 class ItemIn(BaseModel):
     text: str
+
+
+class ChainStepIn(BaseModel):
+    agent_id: str | None = None
+    strength: str = "ops"
+    prompt: str | None = None
+    depends_on: int | None = None
+    inherit: bool = True
 
 
 class AssignIn(BaseModel):
@@ -127,12 +153,17 @@ class AssignIn(BaseModel):
     list_id: str | None = None
     text: str | None = None
     agent_id: str | None = None
+    foreman: bool = False
+    chain: list[ChainStepIn] | None = None
 
 
 @app.on_event("startup")
 async def startup() -> None:
     global loop
     loop = asyncio.get_running_loop()
+    import plant
+
+    plant.set_broadcast(broadcast)
     resumed = db.init_db()
     seen: set[str] = set()
     for job_id in resumed:
@@ -147,14 +178,25 @@ async def startup() -> None:
         if job and job["id"] not in seen:
             seen.add(job["id"])
             harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
+    try:
+        import chains
+
+        for job in chains.kick_open():
+            if job["id"] not in seen:
+                seen.add(job["id"])
+                harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
+    except Exception:
+        pass
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     import catalog
+    import plant
 
     local = await catalog.refresh_local()
     spark = await catalog.refresh_spark()
+    await catalog.refresh_spark2()
     return {
         "ok": True,
         "zen": bool(os.getenv("OPENCODE_API_KEY")),
@@ -163,7 +205,18 @@ async def health() -> dict[str, Any]:
         "spark": bool(spark) or catalog.spark_reachable(),
         "routers": llm.configured(),
         "meetings": meetings.status(),
+        "plant": plant.snapshot(),
     }
+
+
+@app.get("/api/plant")
+async def plant_snap() -> dict[str, Any]:
+    import catalog
+    import plant
+
+    await catalog.refresh_spark()
+    await catalog.refresh_spark2()
+    return plant.snapshot()
 
 
 @app.get("/api/models")
@@ -210,12 +263,33 @@ async def remove_project(project_id: str) -> dict[str, Any]:
         raise HTTPException(409, "a list still uses this project")
     if not db.delete_project(project_id):
         raise HTTPException(404, "project not found")
-    import shutil
-
     import repos
 
-    shutil.rmtree(repos.cache_dir(project_id), ignore_errors=True)
+    repos.purge(project_id)
     return {"ok": True, "id": project_id}
+
+
+@app.get("/api/projects/{project_id}/memory")
+async def project_memory(project_id: str, limit: int = 12) -> dict[str, Any]:
+    import memory
+
+    if not db.get_project(project_id):
+        raise HTTPException(404, "project not found")
+    return {"items": memory.list_for_ui(project_id, limit=limit)}
+
+
+@app.post("/api/projects/{project_id}/repos")
+async def add_repo(project_id: str, body: RepoIn) -> dict[str, Any]:
+    if not db.get_project(project_id):
+        raise HTTPException(404, "project not found")
+    if not body.repository.strip():
+        raise HTTPException(400, "repository is required")
+    return db.add_project_repo(
+        project_id,
+        body.repository,
+        branch=body.branch,
+        label=body.label,
+    )
 
 
 @app.post("/api/projects/{project_id}/sync")
@@ -304,15 +378,25 @@ async def assign_work(body: AssignIn) -> dict[str, Any]:
             list_id=body.list_id,
             text=body.text,
             agent_id=body.agent_id,
+            chain=[step.model_dump() for step in body.chain] if body.chain else None,
+            foreman=body.foreman,
         )
     except KeyError:
         raise HTTPException(404, "item not found") from None
     except LookupError:
         raise HTTPException(400, "no agent") from None
-    job = result.get("job")
-    if job:
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    jobs = result.get("jobs") or ([result["job"]] if result.get("job") else [])
+    seen: set[str] = set()
+    for job in jobs:
+        if not job or job["id"] in seen:
+            continue
+        seen.add(job["id"])
         broadcast({"type": "job.queued", "job": job})
         harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
+    if result.get("chain"):
+        broadcast({"type": "chain.updated", "chain": result["chain"]})
     if result.get("item"):
         broadcast({"type": "task.updated", "item": result["item"]})
     return result
@@ -488,6 +572,69 @@ async def cancel_job(job_id: str) -> dict[str, Any]:
     return {"ok": True, "id": job_id}
 
 
+@app.get("/api/chains/{chain_id}")
+async def get_chain(chain_id: str) -> dict[str, Any]:
+    chain = db.get_chain(chain_id)
+    if not chain:
+        raise HTTPException(404, "chain not found")
+    return chain
+
+
+@app.get("/api/showroom")
+async def showroom() -> dict[str, Any]:
+    return {"items": db.showroom_cards()}
+
+
+@app.post("/api/pins")
+async def add_pin(body: PinIn) -> dict[str, Any]:
+    job = db.get_job(body.job_id)
+    art = db.get_artifact(body.artifact_id)
+    if not job or not art:
+        raise HTTPException(404, "job or file not found")
+    return db.add_pin(
+        job_id=body.job_id,
+        artifact_id=body.artifact_id,
+        agent_id=body.agent_id or job["agent_id"],
+        project_id=body.project_id or job.get("project_id"),
+        auto=False,
+    )
+
+
+@app.delete("/api/pins/{pin_id}")
+async def remove_pin(pin_id: str) -> dict[str, Any]:
+    if not db.delete_pin(pin_id):
+        raise HTTPException(404, "pin not found")
+    return {"ok": True, "id": pin_id}
+
+
+@app.post("/api/shift/start")
+async def start_shift(body: ShiftIn) -> dict[str, Any]:
+    import shift as night
+
+    try:
+        row = await night.start(cap=body.cap, broadcast=broadcast)
+    except night.ShiftOpen as e:
+        raise HTTPException(409, str(e)) from None
+    return {"shift": row}
+
+
+@app.post("/api/shift/stop")
+async def stop_shift() -> dict[str, Any]:
+    import shift as night
+
+    return {"shift": await night.stop(broadcast)}
+
+
+@app.get("/api/shift/latest")
+async def latest_shift() -> dict[str, Any]:
+    import shift as night
+
+    row = night.latest()
+    if not row:
+        return {"note": "", "open": False}
+    return row
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await hub.connect(ws)
@@ -498,6 +645,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     "type": "hello",
                     "agents": db.list_agents(),
                     "jobs": db.in_flight_jobs(),
+                    "plant": __import__("plant").snapshot(),
                 }
             )
         )

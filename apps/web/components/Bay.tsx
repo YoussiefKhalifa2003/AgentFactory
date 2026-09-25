@@ -20,12 +20,14 @@ export function Bay({
   agent: Agent;
   highlighted?: boolean;
 }) {
-  const { live, selectedId, assignWork, select, taskTick } = useFactory();
+  const { live, selectedId, assignWork, select, taskTick, chains } = useFactory();
   const [dropOver, setDropOver] = useState(false);
   const [waiting, setWaiting] = useState(0);
   const state = live[agent.id];
   const activity = state?.job?.activity || "idle";
   const liveNow = Boolean(state?.job) && ["queued", "thinking", "tool"].includes(state.job?.status || "");
+  const chain = state?.job?.chain_id ? chains[state.job.chain_id] : null;
+  const stepNo = chain?.steps.find((s) => s.id === state?.job?.chain_step_id)?.seq;
   const portrait = pfpSrc(agent.pfp) || badgeDataUrl(agent.name, agent.pigment);
 
   useEffect(() => {
@@ -116,6 +118,7 @@ export function Bay({
               : waiting
                 ? `${waiting} waiting`
                 : statusLabel(activity, state?.job?.status)}
+          {chain && stepNo ? ` · ${stepNo} of ${chain.steps.length}` : ""}
         </p>
       </div>
     </div>

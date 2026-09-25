@@ -70,6 +70,7 @@ export type Artifact = {
   kind: string;
   path?: string;
   mime?: string | null;
+  created_at?: string;
 };
 
 export type Job = {
@@ -84,9 +85,115 @@ export type Job = {
   task_id?: string | null;
   project_id?: string | null;
   project_name?: string | null;
+  chain_id?: string | null;
+  chain_step_id?: string | null;
   created_at?: string;
   updated_at?: string;
   artifacts?: Artifact[];
+};
+
+export type PlantSlot = {
+  ok?: boolean;
+  locked?: boolean;
+  busy?: boolean;
+  agentId?: string | null;
+  agentName?: string | null;
+  jobId?: string | null;
+  model?: string | null;
+  reason?: string | null;
+  inFlight?: number;
+};
+
+export type PlantSnapshot = {
+  local: PlantSlot;
+  spark1: PlantSlot;
+  spark2: PlantSlot;
+  openrouter?: PlantSlot;
+  zen?: PlantSlot;
+  cloud?: PlantSlot;
+};
+
+export type ProjectRepo = {
+  id: string;
+  project_id: string;
+  repository: string;
+  branch: string;
+  label: string;
+};
+
+export type Project = {
+  id: string;
+  name: string;
+  title?: string;
+  organization?: string;
+  project?: string;
+  repository?: string;
+  branch: string;
+  synced_at?: string | null;
+  sync_error?: string | null;
+  repos?: ProjectRepo[];
+};
+
+export type MemoryRow = {
+  id: string;
+  job_id: string;
+  agent_id: string;
+  agent_name: string;
+  status: string;
+  task: string;
+  files: string[];
+  kind?: string;
+  created_at?: string;
+};
+
+export type ChainStep = {
+  id: string;
+  chain_id: string;
+  seq: number;
+  agent_id?: string | null;
+  strength: string;
+  prompt: string;
+  depends_on?: number | null;
+  inherit?: number;
+  job_id?: string | null;
+  status: string;
+};
+
+export type Chain = {
+  id: string;
+  list_id?: string | null;
+  item_id?: string | null;
+  project_id?: string | null;
+  title?: string;
+  status: string;
+  created_by?: string;
+  steps: ChainStep[];
+};
+
+export type PinCard = {
+  id: string;
+  project_id?: string | null;
+  job_id: string;
+  artifact_id: string;
+  agent_id: string;
+  auto?: number;
+  created_at?: string;
+  artifact?: Artifact | null;
+  agent_name?: string;
+  caption?: string;
+  project_title?: string | null;
+};
+
+export type ShiftNote = {
+  id: string;
+  started_at: string;
+  ended_at?: string | null;
+  mode?: string;
+  note: string;
+  jobs_started?: number;
+  jobs_done?: number;
+  jobs_blocked?: number;
+  open?: boolean;
 };
 
 export type LiveState = {
@@ -130,9 +237,11 @@ export type TaskList = {
   project?: {
     id: string;
     name: string;
+    title?: string;
     branch: string;
     synced_at?: string | null;
     sync_error?: string | null;
+    repos?: { id: string; repository: string; label: string }[];
   } | null;
   sort_at?: string;
   item_count: number;

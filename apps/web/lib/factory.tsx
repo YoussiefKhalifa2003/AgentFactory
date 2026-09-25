@@ -13,8 +13,12 @@ import {
   API_URL,
   Artifact,
   Agent,
+  Chain,
   Job,
   LiveState,
+  PinCard,
+  PlantSnapshot,
+  ShiftNote,
   WS_URL,
 } from "./types";
 
@@ -23,6 +27,8 @@ type AssignArgs = {
   agentId?: string;
   text?: string;
   listId?: string;
+  foreman?: boolean;
+  chain?: { agent_id?: string; strength: string; prompt?: string; depends_on?: number | null; inherit?: boolean }[];
 };
 
 function busyStatus(status?: string) {
@@ -44,16 +50,24 @@ type FactoryContextValue = {
   offline: boolean;
   taskTick: number;
   openListId: string;
+  plant: PlantSnapshot | null;
+  chains: Record<string, Chain>;
+  showroom: PinCard[];
+  shift: ShiftNote | null;
+  preview: { jobId: string; file: Artifact } | null;
   setOpenListId: (id: string) => void;
   select: (id: string | null) => void;
   openStage: (id: string) => void;
   closeStage: () => void;
   toggleStage: (id?: string) => void;
+  openPreview: (jobId: string, file: Artifact) => void;
+  closePreview: () => void;
   submitJob: (agentId: string, prompt: string) => void;
   assignWork: (args: AssignArgs) => Promise<{ queued?: boolean; agent?: Agent; job?: Job } | void>;
   deleteAgent: (agentId: string) => Promise<void>;
   updateAgent: (agentId: string, payload: Partial<Agent>) => Promise<Agent>;
   refresh: () => Promise<void>;
+  refreshShowroom: () => Promise<void>;
   setAgents: (agents: Agent[]) => void;
 };
 
@@ -74,7 +88,13 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   const [offline, setOffline] = useState(false);
   const [taskTick, setTaskTick] = useState(0);
   const [openListId, setOpenListId] = useState("inbox");
+  const [plant, setPlant] = useState<PlantSnapshot | null>(null);
+  const [chains, setChains] = useState<Record<string, Chain>>({});
+  const [showroom, setShowroom] = useState<PinCard[]>([]);
+  const [shift, setShift] = useState<ShiftNote | null>(null);
+  const [preview, setPreview] = useState<{ jobId: string; file: Artifact } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const seenChains = useRef<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
@@ -93,9 +113,62 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshShowroom = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_URL}/api/showroom`);
+      if (!r.ok) return;
+      const data = await r.json();
+      setShowroom(Array.isArray(data.items) ? data.items : Array.isArray(data) ? data : []);
+    } catch {
+      /* showroom lands in Wave B */
+    }
+  }, []);
+
+  const loadChain = useCallback(async (chainId: string) => {
+    if (!chainId || seenChains.current.has(chainId)) return;
+    seenChains.current.add(chainId);
+    try {
+      const r = await fetch(`${API_URL}/api/chains/${chainId}`);
+      if (!r.ok) {
+        seenChains.current.delete(chainId);
+        return;
+      }
+      const chain = (await r.json()) as Chain;
+      setChains((prev) => ({ ...prev, [chain.id]: chain }));
+    } catch {
+      seenChains.current.delete(chainId);
+    }
+  }, []);
+
   useEffect(() => {
     refresh().catch(() => undefined);
-  }, [refresh]);
+    refreshShowroom().catch(() => undefined);
+  }, [refresh, refreshShowroom]);
+
+  useEffect(() => {
+    let stop = false;
+    const tick = async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/plant`);
+        if (!r.ok || stop) return;
+        setPlant(await r.json());
+      } catch {
+        /* plant is optional until the API is up */
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 4000);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    for (const job of jobs) {
+      if (job.chain_id) loadChain(job.chain_id);
+    }
+  }, [jobs, loadChain]);
 
   useEffect(() => {
     if (!jobs.length) return;
@@ -219,6 +292,9 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
               return [...map.values()];
             });
           }
+          if (msg.plant && typeof msg.plant === "object") {
+            setPlant(msg.plant as PlantSnapshot);
+          }
           setLive((prev) => {
             if (!incoming.length) return prev;
             const next = { ...prev };
@@ -292,6 +368,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
                 : j
             )
           );
+          if (status === "done") refreshShowroom().catch(() => undefined);
         }
         if (msg.type === "job.artifact" && msg.artifact && msg.jobId) {
           const art = msg.artifact as Artifact;
@@ -307,18 +384,53 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
           );
         }
         if (msg.type === "job.token" && msg.agentId) {
-          const slot = (tokenBuf[msg.agentId] ||= { text: "", think: "" });
-          if (msg.channel === "think") slot.think += msg.delta || "";
-          else slot.text += msg.delta || "";
+          const agentId = String(msg.agentId);
+          const slot = (tokenBuf[agentId] ||= { text: "", think: "" });
+          if (msg.channel === "think") slot.think += String(msg.delta || "");
+          else slot.text += String(msg.delta || "");
           if (!raf) raf = requestAnimationFrame(flushTokens);
         }
-        if (msg.jobId && msg.agentId && msg.type !== "job.token") {
+        if (msg.type === "job.file" && msg.artifact && msg.agentId) {
+          const art = msg.artifact as Artifact;
+          const agentId = String(msg.agentId);
+          const jobId = String(msg.jobId || "");
           setLive((prev) => {
-            const cur = prev[msg.agentId] || emptyLive();
+            const cur = prev[agentId] || emptyLive();
+            const artifacts = [
+              ...cur.artifacts.filter((a) => a.id !== art.id && a.name !== art.name),
+              art,
+            ];
+            return { ...prev, [agentId]: { ...cur, artifacts } };
+          });
+          if (jobId) {
+            setJobs((prev) =>
+              prev.map((j) =>
+                j.id === jobId
+                  ? {
+                      ...j,
+                      artifacts: [...(j.artifacts || []).filter((a) => a.id !== art.id && a.name !== art.name), art],
+                    }
+                  : j
+              )
+            );
+          }
+        } else if (msg.type === "plant" && msg.plant && typeof msg.plant === "object") {
+          setPlant(msg.plant as PlantSnapshot);
+        } else if (msg.type === "chain.updated" && msg.chain) {
+          const chain = msg.chain as Chain;
+          seenChains.current.add(chain.id);
+          setChains((prev) => ({ ...prev, [chain.id]: chain }));
+        } else if (msg.type === "shift.updated" && msg.shift) {
+          setShift(msg.shift as ShiftNote);
+        } else if (msg.jobId && msg.agentId && msg.type !== "job.token") {
+          const agentId = String(msg.agentId);
+          const jobId = String(msg.jobId);
+          setLive((prev) => {
+            const cur = prev[agentId] || emptyLive();
             const job = {
               ...(cur.job || {
-                id: msg.jobId,
-                agent_id: msg.agentId,
+                id: jobId,
+                agent_id: agentId,
                 prompt: "",
                 status: "thinking",
                 activity: "thinking",
@@ -326,8 +438,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
                 output: "",
                 error: null,
               }),
-              activity: msg.activity || cur.job?.activity || "thinking",
-              caption: msg.caption || cur.job?.caption || "",
+              activity: (msg.activity as string) || cur.job?.activity || "thinking",
+              caption: (msg.caption as string) || cur.job?.caption || "",
               status:
                 msg.type === "job.done"
                   ? "done"
@@ -336,17 +448,19 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
                     : msg.type === "job.cancelled"
                       ? "cancelled"
                       : cur.job?.status || "thinking",
-              output: msg.output ?? cur.job?.output ?? "",
-              error: msg.error ?? cur.job?.error ?? null,
-              id: msg.jobId,
-              agent_id: msg.agentId,
+              output: (msg.output as string) ?? cur.job?.output ?? "",
+              error: (msg.error as string) ?? cur.job?.error ?? null,
+              id: jobId,
+              agent_id: agentId,
+              chain_id: (msg.chain_id as string) || cur.job?.chain_id || null,
+              chain_step_id: (msg.chain_step_id as string) || cur.job?.chain_step_id || null,
             };
             let tokens = cur.tokens;
             let think = cur.think || "";
             if (msg.type === "job.started") {
               tokens = "";
               think = "";
-              delete tokenBuf[msg.agentId];
+              delete tokenBuf[agentId];
             }
             if (msg.type === "job.done" || msg.type === "job.blocked") {
               const incoming = String(msg.output || "");
@@ -356,11 +470,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
             const artifacts =
               msg.type === "job.artifact" && msg.artifact
                 ? [
-                    ...cur.artifacts.filter((a) => a.id !== msg.artifact.id),
+                    ...cur.artifacts.filter((a) => a.id !== (msg.artifact as Artifact).id),
                     msg.artifact as Artifact,
                   ]
                 : cur.artifacts;
-            return { ...prev, [msg.agentId]: { job, tokens, think, artifacts } };
+            return { ...prev, [agentId]: { job, tokens, think, artifacts } };
           });
         }
       };
@@ -372,7 +486,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       if (raf) cancelAnimationFrame(raf);
       wsRef.current?.close();
     };
-  }, [refresh]);
+  }, [refresh, refreshShowroom]);
 
   const deleteAgent = useCallback(async (agentId: string) => {
     const r = await fetch(`${API_URL}/api/agents/${agentId}`, { method: "DELETE" });
@@ -416,6 +530,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
         agent_id: args.agentId || null,
         text: args.text || null,
         list_id: args.listId || null,
+        foreman: args.foreman || false,
+        chain: args.chain || null,
       }),
     });
     if (!r.ok) {
@@ -459,6 +575,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       offline,
       taskTick,
       openListId,
+      plant,
+      chains,
+      showroom,
+      shift,
+      preview,
       setOpenListId,
       select: setSelectedId,
       openStage: (id: string) => {
@@ -472,11 +593,14 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
         setSelectedId(target);
         setStageOpen((open) => (id && id !== selectedId ? true : !open));
       },
+      openPreview: (jobId: string, file: Artifact) => setPreview({ jobId, file }),
+      closePreview: () => setPreview(null),
       submitJob,
       assignWork,
       deleteAgent,
       updateAgent,
       refresh,
+      refreshShowroom,
       setAgents,
     }),
     [
@@ -490,11 +614,17 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       offline,
       taskTick,
       openListId,
+      plant,
+      chains,
+      showroom,
+      shift,
+      preview,
       submitJob,
       assignWork,
       deleteAgent,
       updateAgent,
       refresh,
+      refreshShowroom,
     ]
   );
 

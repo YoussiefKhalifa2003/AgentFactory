@@ -49,7 +49,9 @@ This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com
 | **Live floor** | Optional 3D stage of *that* agent — never opened by clicking the bay |
 | **Jobs** | Stored work with status, tokens, artifacts — not a throwaway chat log |
 
-Agents are people with a name, pigment, portrait, strengths, and a model. A to-do is assigned to a matching desk. While they work, the header lists every busy name (`Ada and Euclid are working`).
+The header lists every busy name (`Ada and Euclid are working`). Four dots beside the connected light show This PC, Spark 1, Spark 2, and Cloud.
+
+A list can send work down a **crew** (Scout then Cade then Hamza) or **Let the floor split it**. Drop on a bay is still one desk. Finished View files land on a **showroom** under the bays — click a card to open that desk’s View. **Start night shift** on the power strip runs parked items up to eight, then the morning note lists finishes, blocks, and pins.
 
 ---
 
@@ -130,11 +132,13 @@ Discovery: any `skills/<name>/SKILL.md` with YAML `kind: tool` appears in the To
 
 ## Linked repositories
 
-A list, including a meeting list, can be linked to an Azure DevOps repository. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code read). On that list, choose **Link a repo**, then **Refresh code**. The checkout stays on this machine under `.run/repos` and is read-only.
+A list, including a meeting list, can be linked to a Tatweer Azure DevOps project. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code read). Projects stay on a shelf so you do not paste the same git URL every time: pick Stormcast, or paste a new repo link. **Refresh** / **Sync** pulls the local cache. Extra repos on the same project live beside the default checkout.
 
 Every desk that receives a task from that list can search and read those files. Planning and writing desks get that access too. They still do not get the sandbox write tools.
 
-Finished work on that project is remembered. The next desk on the same project sees who did the earlier job and what they wrote. A different project does not. The token is never stored in the database or the prompt.
+Finished work on that project is remembered on a shared ledger. The next desk on the same project sees who did the earlier job, what they wrote, and a short line for whoever is on the floor now. A different project does not. The token is never stored in the database or the prompt.
+
+The header power strip shows four dots: This PC (the 4090), Spark 1, Spark 2, and Cloud. Spark 2 stays dark if its engineer key is rejected.
 
 ---
 
@@ -197,6 +201,7 @@ flowchart TB
     WS[WebSocket /ws]
     Harness[harness.py]
     Catalog[catalog.py]
+    Plant[plant.py]
     Sandbox[sandbox.py]
     Packs[packs.py / diagrams.py]
     DB[(SQLite .run/foundry.db)]
@@ -212,6 +217,8 @@ flowchart TB
   HTTP --> Harness
   WS --> Harness
   Harness --> Catalog
+  Harness --> Plant
+  Catalog --> Plant
   Harness --> Sandbox
   Harness --> Packs
   Harness --> DB
@@ -335,7 +342,7 @@ Frontend (optional, `apps/web/.env.local`):
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/api/health` | Zen / OpenRouter / Ollama flags |
+| `GET` | `/api/health` | Zen / OpenRouter / Ollama flags + plant |
 | `GET` | `/api/models` | Catalog + availability |
 | `GET` | `/api/strengths` | Strengths + tool skills |
 | `GET`/`POST` | `/api/agents` | Roster / forge |
@@ -343,15 +350,24 @@ Frontend (optional, `apps/web/.env.local`):
 | `POST` | `/api/agents/{id}/pfp` | Portrait upload |
 | `GET`/`POST` | `/api/lists` | Stored to-do lists |
 | `PATCH` | `/api/lists/{id}` | Link or unlink a project |
-| `GET`/`POST` | `/api/projects` | Azure DevOps repo links |
+| `GET`/`POST` | `/api/projects` | Azure DevOps project shelf |
 | `POST` | `/api/projects/{id}/sync` | Refresh the local code cache |
-| `POST` | `/api/assign` | Hand a list item or text to a desk |
+| `POST` | `/api/projects/{id}/repos` | Add another repo on that project |
+| `GET` | `/api/projects/{id}/memory` | Shared ledger for that project |
+| `GET` | `/api/plant` | This PC / Spark / Cloud occupancy |
+| `POST` | `/api/assign` | Hand a list item or text to a desk. Optional `chain` or `foreman` |
+| `GET` | `/api/chains/{id}` | Handoff steps |
+| `GET` | `/api/showroom` | Floor pins |
+| `POST`/`DELETE` | `/api/pins` | Pin or unpin a View file |
+| `POST` | `/api/shift/start` | Night shift, cap 8 |
+| `POST` | `/api/shift/stop` | Stop and write the morning note |
+| `GET` | `/api/shift/latest` | Latest note |
 | `GET` | `/api/meetings` | Optional Meeting Note Taker feed |
 | `POST` | `/api/jobs` | Direct job |
 | `POST` | `/api/jobs/{id}/cancel` | Stop a running job |
 | `GET` | `/api/jobs/{id}/site/{path}` | Inline website |
 | `GET` | `/api/artifacts/{id}/file` | Inline; `?download=1` to save |
-| `WS` | `/ws` | `job.token`, `job.activity`, `job.done`, `job.artifact` |
+| `WS` | `/ws` | `job.token`, `job.activity`, `job.done`, `job.artifact`, `job.file`, `plant`, `chain.updated`, `shift.updated` |
 
 Sandbox: timed Python, no network, path confined to that job’s folder.
 

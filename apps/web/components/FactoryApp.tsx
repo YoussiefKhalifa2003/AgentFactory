@@ -5,6 +5,7 @@ import { FactoryProvider, useFactory } from "@/lib/factory";
 import { Strength } from "@/lib/types";
 import { Floor } from "./Floor";
 import { Inspector } from "./Inspector";
+import { PlantDots } from "./LiveStrip";
 import { ListsSidebar } from "./MeetingsDock";
 import { Stage } from "./Stage";
 
@@ -45,6 +46,7 @@ function Shell() {
               style={{ background: connected ? "#2f7d4a" : "#b42318" }}
               title={connected ? "Connected" : "Reconnecting"}
             />
+            <PlantDots />
             <h1 className="truncate text-[1.65rem] font-semibold tracking-tight">
               {stageOpen ? "Stage" : "Workspace"}
             </h1>
