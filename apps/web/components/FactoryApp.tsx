@@ -4,87 +4,135 @@ import { useState } from "react";
 import { FactoryProvider, useFactory } from "@/lib/factory";
 import { Strength } from "@/lib/types";
 import { Floor } from "./Floor";
-import { Inspector } from "./Inspector";
+import { Inspector, FilePreview } from "./Inspector";
 import { PlantDots } from "./LiveStrip";
 import { ListsSidebar } from "./MeetingsDock";
 import { Stage } from "./Stage";
 
 function Shell() {
-  const { stageOpen, agents, live, connected, booted, offline } = useFactory();
+  const {
+    stageOpen,
+    stageMode,
+    agents,
+    selectedId,
+    connected,
+    booted,
+    offline,
+    openOffice,
+    openDesk,
+    closeStage,
+    preview,
+    closePreview,
+  } = useFactory();
   const [dragStrength, setDragStrength] = useState<Strength | null>(null);
   const [pane, setPane] = useState<"lists" | "floor" | "desk">("floor");
-  const working = agents.filter((a) => {
-    const status = live[a.id]?.job?.status;
-    return Boolean(status && !["done", "idle", "blocked", "cancelled"].includes(status));
-  });
-  const workingLabel =
-    working.length === 0
-      ? ""
-      : working.length === 1
-        ? `${working[0].name} is working`
-        : working.length === 2
-          ? `${working[0].name} and ${working[1].name} are working`
-          : `${working
-              .slice(0, -1)
-              .map((a) => a.name)
-              .join(", ")}, and ${working[working.length - 1].name} are working`;
+  const selected = agents.find((a) => a.id === selectedId) || agents[0];
 
   return (
-    <div className="flex h-dvh min-h-0 gap-3 overflow-hidden px-3 py-3 sm:px-5 sm:py-4">
+    <div className="flex h-dvh min-h-0 gap-3 overflow-hidden px-3 py-3 sm:px-4 sm:py-3">
       <div
-        className={`${pane === "lists" ? "flex" : "hidden"} min-h-0 w-full shrink-0 lg:flex lg:w-auto ${
+        className={`${pane === "lists" ? "flex" : "hidden"} min-h-0 w-full shrink-0 md:flex md:w-[18rem] lg:w-[20rem] ${
           stageOpen ? "lg:hidden" : ""
         }`}
       >
         <ListsSidebar onDragStrength={setDragStrength} />
       </div>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
-        <header className="flex h-12 shrink-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2.5">
+        <header className="flex h-11 shrink-0 flex-nowrap items-center justify-between gap-2 overflow-hidden">
+          <div className="flex min-w-0 items-center gap-2.5">
             <span
-              className="h-2.5 w-2.5 shrink-0 rounded-full"
+              className="h-2 w-2 shrink-0 rounded-full"
               style={{ background: connected ? "#2f7d4a" : "#b42318" }}
               title={connected ? "Connected" : "Reconnecting"}
             />
             <PlantDots />
-            <h1 className="truncate text-[1.65rem] font-semibold tracking-tight">
-              {stageOpen ? "Stage" : "Workspace"}
-            </h1>
-            {workingLabel && (
-              <span className="hidden truncate text-sm text-[var(--ink-soft)] sm:inline">
-                {workingLabel}
-              </span>
+            <h1 className="display truncate text-[1.55rem] leading-none">Workspace</h1>
+          </div>
+          <div className="flex shrink-0 flex-nowrap items-center gap-1.5 sm:gap-2">
+            {stageOpen && (
+              <button type="button" onClick={closeStage} className="btn shrink-0">
+                Floor
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                openOffice();
+                setPane("floor");
+              }}
+              className={`btn shrink-0 ${stageMode === "office" ? "btn-solid" : ""}`}
+            >
+              Office
+            </button>
+            <button
+              type="button"
+              disabled={!selected}
+              onClick={() => {
+                if (!selected) return;
+                openDesk(selected.id);
+                setPane("floor");
+              }}
+              className={`btn shrink-0 ${stageMode === "desk" ? "btn-solid" : ""}`}
+            >
+              Desk
+            </button>
+            {!stageOpen && (
+              <a href="/forge" className="btn btn-solid shrink-0">
+                New agent
+              </a>
             )}
           </div>
-          <a href="/forge" className="btn btn-solid shrink-0">
-            New agent
-          </a>
         </header>
-        <div className="flex gap-2 lg:hidden">
+        <div className="flex gap-2 md:hidden">
           {(["lists", "floor", "desk"] as const).map((id) => (
             <button
               key={id}
               type="button"
-              className={`btn px-3 py-1 text-xs ${pane === id ? "btn-solid" : ""}`}
+              className={`btn min-h-11 px-3 py-1 text-xs ${pane === id ? "btn-solid" : ""}`}
               onClick={() => setPane(id)}
             >
               {id === "lists" ? "Lists" : id === "floor" ? "Floor" : "Desk"}
             </button>
           ))}
         </div>
-        {!booted && <p className="text-sm text-[var(--ink-soft)]">Opening the factory…</p>}
+        <div className="hidden gap-2 md:flex lg:hidden">
+          {(["floor", "desk"] as const).map((id) => (
+            <button
+              key={id}
+              type="button"
+              className={`btn min-h-11 px-3 py-1 text-xs ${pane === id ? "btn-solid" : ""}`}
+              onClick={() => setPane(id)}
+            >
+              {id === "floor" ? "Floor" : "Desk"}
+            </button>
+          ))}
+        </div>
+        {!booted && <p className="text-sm text-[var(--ink-soft)]">Opening…</p>}
         {booted && offline && agents.length === 0 && (
-          <p className="text-sm text-[#b42318]">Can’t reach the API. Is it running on port 8000?</p>
+          <p className="text-sm text-[#b42318]">Can’t reach the API on port 8000.</p>
         )}
-        <div className="grid min-h-0 flex-1 gap-3 overflow-hidden lg:grid-cols-[minmax(0,1.45fr)_minmax(300px,0.9fr)] [&>*]:h-full [&>*]:min-h-0">
-          <div className={pane === "floor" ? "min-h-0" : "hidden lg:block"}>
+        <div
+          className={`grid min-h-0 flex-1 gap-3 overflow-hidden [&>*]:h-full [&>*]:min-h-0 ${
+            stageOpen
+              ? "lg:grid-cols-[minmax(0,2.2fr)_minmax(240px,0.65fr)]"
+              : "md:grid-cols-[minmax(0,1.5fr)_minmax(240px,0.85fr)] lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.85fr)]"
+          }`}
+        >
+          <div
+            className={`${pane === "floor" ? "min-h-0" : "hidden"} ${
+              pane !== "desk" ? "md:block" : "md:hidden"
+            } lg:block`}
+          >
             {stageOpen ? <Stage /> : <Floor matchStrength={dragStrength} />}
           </div>
-          <div className={pane === "desk" ? "min-h-0" : "hidden lg:block"}>
+          <div className={`${pane === "desk" ? "min-h-0" : "hidden"} lg:block`}>
             <Inspector compact={stageOpen} />
           </div>
         </div>
       </div>
+      {preview && (
+        <FilePreview jobId={preview.jobId} file={preview.file} onClose={closePreview} />
+      )}
     </div>
   );
 }
