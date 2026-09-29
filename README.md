@@ -2,7 +2,7 @@
 
 **A personal AI factory.** You forge named agents, give them a desk, and assign real work. Lists sit on the left. Agents occupy the floor. The selected desk shows history, files, and a live answer — not a chatbot inbox.
 
-This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com/YoussiefKhalifa2003/AgentFactory). It is built for one operator first: you. The UI is paper-light on purpose. Clicking an agent opens their **desk**, not a 3D stage. Live floor is opt-in.
+This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com/YoussiefKhalifa2003/AgentFactory). It is built for one operator first: you. The UI is paper-light on purpose. Clicking an agent opens their **desk**, not 3D. **Office** is the whole room — opt-in from the header or the banner on the floor.
 
 <p align="center">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-1c1814?style=for-the-badge&labelColor=f3eee4">
@@ -30,6 +30,7 @@ This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com
 - [Architecture](#architecture)
 - [Adding a skill](#adding-a-skill)
 - [Run it](#run-it)
+- [Phone](#phone)
 - [Environment](#environment)
 - [API](#api)
 - [Evals](#evals)
@@ -46,7 +47,7 @@ This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com
 | **Workspace** | Lists on the left, agent bays in the middle, the selected desk on the right |
 | **Forge** | Create an agent: look, one or two strengths, optional tool skills, a brain |
 | **Desk** | Assign work, read the finished answer, **View** / **Download** files |
-| **Live floor** | Optional 3D stage of *that* agent — never opened by clicking the bay |
+| **Office** | Optional 3D room of *every* desk — never opened by clicking a bay |
 | **Jobs** | Stored work with status, tokens, artifacts — not a throwaway chat log |
 
 The header lists every busy name (`Ada and Euclid are working`). Four dots beside the connected light show This PC, Spark 1, Spark 2, and Cloud.
@@ -59,7 +60,7 @@ A list can send work down a **crew** (Scout then Cade then Hamza) or **Let the f
 
 ### Lists
 
-Inbox plus custom lists. Meeting actions can be pulled in if the Meeting Note Taker database is on this machine. Drag a task onto a bay, or click assign. Suggested strength is inferred from the text (code, maths, research, writing, data, planning, ops).
+Inbox in, Done out. Custom lists sit under those. Meeting actions can be pulled in if the Meeting Note Taker database is on this machine. Drag a task onto a bay, or click assign. Suggested strength is inferred from the text (code, maths, research, writing, data, planning, ops, review, brief, qa). Finished jobs land in **Done** — click a card to open View.
 
 ### Floor
 
@@ -68,9 +69,9 @@ Each bay is a desk. Selected = outline. Working = live pigment. Drop a task on t
 ### Desk card
 
 - Strengths: max **two** (the kind of work)
-- Tools: extras that stack (draw.io, spreadsheet, PDF)
+- Tools: extras that stack (draw.io, spreadsheet, PDF, slides)
 - Model picker: local Ollama, OpenRouter, or OpenCode Zen
-- Thread: the job, the answer, **View** for the best file
+- Thread: the live job (and at most one last answer). Finished work is in **Done** on the left. **View** for the best file
 - Hand a one-off task from the field at the bottom
 
 **View** is not a dump of attachments. It picks the strongest file first:
@@ -84,9 +85,9 @@ Each bay is a desk. Selected = outline. Working = live pigment. Drop a task on t
 
 Other files stay as extra View buttons and short Download labels (`Download sheet`, `Download PDF`, `Download chart`).
 
-### Live floor
+### Office
 
-A button on the desk. Full-height canvas of that worker. Hide it and you are back on the workspace. Clicking a bay never jumps you into 3D.
+A banner on the floor and an **Office** button in the header. One room, every agent, live screens, finished work on the showroom wall. Night shift dims the lights. A crew job flies a folder between desks. Click a person to open their desk. Clicking a bay never jumps you into 3D.
 
 ---
 
@@ -103,8 +104,13 @@ Strengths decide **what kind of job** the desk is for. Clamp is two. They map 1:
 | `data` | Data | Tables, metrics, analysis |
 | `planning` | Planning | Ordered plans. No LLM tools (local Qwen mishandles tool JSON) |
 | `ops` | Ops | Follow-ups, owners, process |
+| `review` | Review | Verdict + numbered findings. Saves `review.md`. Searches a linked repo |
+| `brief` | Brief | Situation / So-what / Ask / Next. Reply only |
+| `qa` | QA | Writes `test_*.py` and runs them |
 
-Built-in harness tools (not skills): `write_file`, `read_file`, `run_python`, `list_workspace`, `fetch_url`. Coding, maths, and data get those tools. Research gets `fetch_url` when the prompt contains a URL. Planning and writing stay in the reply.
+The **first** strength on the bay is the job type. The harness pins that pack as PRIMARY and uses a protocol for that skill (coding writes files, review writes findings, brief stays in the reply). A second strength is an extra, not a reason to wander.
+
+Built-in harness tools (not skills): `write_file`, `read_file`, `run_python`, `list_workspace`, `fetch_url`. Coding, maths, data, review, QA, and slides get those tools. Research gets `fetch_url` when the prompt contains a URL. Planning, writing, brief, and ops stay in the reply.
 
 Starter bays if the database is empty:
 
@@ -125,6 +131,7 @@ Tool skills are **addable packs**. They do not count against the two-strength ca
 | `drawio` | draw.io | `diagram.mmd` + `diagram.drawio` | Mermaid chart (draw.io is the extra) |
 | `spreadsheet` | Spreadsheet | `sheet.csv` | Table on the desk |
 | `pdf` | PDF | `pack.pdf` | Inline PDF — the file you send |
+| `slides` | Slides | `slides.html` | Deck — one paper-light template, open with View |
 
 A writing desk drafts in the thread. A writing desk **with PDF** produces a pack you can email. A data desk analyses. A desk **with Spreadsheet** leaves a sheet you can open.
 
@@ -132,7 +139,7 @@ Discovery: any `skills/<name>/SKILL.md` with YAML `kind: tool` appears in the To
 
 ## Linked repositories
 
-A list, including a meeting list, can be linked to a Tatweer Azure DevOps project. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code read). Projects stay on a shelf so you do not paste the same git URL every time: pick Stormcast, or paste a new repo link. **Refresh** / **Sync** pulls the local cache. Extra repos on the same project live beside the default checkout.
+A list, including a meeting list, can be linked to a Tatweer Azure DevOps project. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code read). You can add the token and press **Sync** without restarting the API. Projects stay on a shelf so you do not paste the same git URL every time: pick Stormcast, or paste a new repo link. **Refresh** / **Sync** pulls the local cache. Extra repos on the same project live beside the default checkout. The list still links if the token is not set yet; desks cannot read the repo until Sync succeeds.
 
 Every desk that receives a task from that list can search and read those files. Planning and writing desks get that access too. They still do not get the sandbox write tools.
 
@@ -153,8 +160,8 @@ flowchart LR
   D --> E
   E --> F[Model stream]
   F --> G{Tools?}
-  G -->|coding maths data| H[Sandbox / fetch]
-  G -->|planning writing| I[Reply]
+  G -->|coding maths data review qa| H[Sandbox / fetch]
+  G -->|planning writing brief ops| I[Reply]
   H --> I
   I --> J[Save skill files]
   J --> K[Artifacts + View]
@@ -194,7 +201,7 @@ flowchart TB
     Floor[Floor + bays]
     Desk[Inspector desk]
     Forge[Forge]
-    Stage[Live floor R3F]
+    Stage[Office R3F]
   end
   subgraph api [apps/api — FastAPI]
     HTTP[REST]
@@ -311,6 +318,18 @@ Two PowerShell windows: API on **8000**, UI on **3000**.
 
 ---
 
+## Phone
+
+iPhone client is a PWA in `AI_HarnessPhone`, reached over Tailscale. Models stay on the PC. Walkthrough: [`AI_HarnessPhone/README.md`](AI_HarnessPhone/README.md). Build and print the Serve command:
+
+```powershell
+.\scripts\phone.ps1
+```
+
+Then `tailscale serve --bg 8000` and Safari → Add to Home Screen. Do not expose port 8000 on the LAN.
+
+---
+
 ## Environment
 
 | Variable | Purpose |
@@ -328,6 +347,7 @@ Two PowerShell windows: API on **8000**, UI on **3000**.
 | `MEETING_ME_ALIASES` | Names treated as “mine” on meeting actions |
 | `AZURE_DEVOPS_PAT` | Read code from a linked Azure DevOps repository |
 | `HOST` / `PORT` | API bind (default `127.0.0.1:8000`) |
+| `FOUNDRY_TOKEN` | Optional. If set, HTTP `Authorization: Bearer` and WebSocket `?token=` are required |
 
 Frontend (optional, `apps/web/.env.local`):
 
@@ -342,7 +362,7 @@ Frontend (optional, `apps/web/.env.local`):
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/api/health` | Zen / OpenRouter / Ollama flags + plant |
+| `GET` | `/api/health` | Zen / OpenRouter / Ollama flags + plant. `?ping=1` is a fast `{ok: true}` |
 | `GET` | `/api/models` | Catalog + availability |
 | `GET` | `/api/strengths` | Strengths + tool skills |
 | `GET`/`POST` | `/api/agents` | Roster / forge |
@@ -392,7 +412,7 @@ Prompts live in `evals/coding.md` and `evals/maths.md`. Ada and Euclid must exis
 - `run_python` is isolated and timed; it cannot see the host tree
 - `fetch_url` is for pages the user asked to open
 - Mermaid render uses `securityLevel: "strict"`
-- This is a **personal** factory on localhost. Do not expose `8000` without auth
+- This is a **personal** factory on localhost. Do not expose `8000` on the LAN. Tailscale Serve proxies HTTPS to loopback. Set `FOUNDRY_TOKEN` if anything besides your desktop tab will call the API
 
 ---
 
@@ -412,10 +432,13 @@ AgentFactory/
 │   └── web/                 Next.js workspace
 │       ├── app/             Routes
 │       └── components/      Floor, Inspector, Forge, Stage
+├── AI_HarnessPhone/         iPhone PWA (static export, port 3001 in dev)
+├── packages/ui-tokens/      Shared paper/ink/pigment CSS
 ├── skills/                  SKILL.md packs
 ├── avatar/                  3D kit notes
 ├── evals/
 ├── scripts/dev.ps1
+├── scripts/phone.ps1
 └── README.md
 ```
 
