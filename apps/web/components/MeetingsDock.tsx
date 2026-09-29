@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { API_URL, ListItem, MemoryRow, Project, Strength, TaskList, strengthLabel } from "@/lib/types";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { API_URL, ListItem, MemoryRow, Project, Strength, TaskList } from "@/lib/types";
 import { pickBestAgent, TASK_MIME, taskDragPayload } from "@/lib/tasks";
 import { useFactory } from "@/lib/factory";
 
@@ -39,9 +39,11 @@ export function ListsSidebar({
 }: {
   onDragStrength: (strength: Strength | null) => void;
 }) {
-  const { agents, assignWork, select, selectedId, taskTick, setOpenListId } = useFactory();
+  const { agents, assignWork, select, selectedId, taskTick, setOpenListId, openListId, openPreview } = useFactory();
   const [lists, setLists] = useState<TaskList[]>([]);
-  const [openId, setOpenId] = useState<string>("inbox");
+  const openId = openListId || "inbox";
+  const openIdRef = useRef(openId);
+  openIdRef.current = openId;
   const [items, setItems] = useState<ListItem[]>([]);
   const [mine, setMine] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -64,24 +66,29 @@ export function ListsSidebar({
     repository: "",
   });
   const [shelf, setShelf] = useState<Project[]>([]);
+  const [codeRead, setCodeRead] = useState(true);
   const [ledger, setLedger] = useState<MemoryRow[]>([]);
   const [crewFor, setCrewFor] = useState<string | null>(null);
   const [crewIds, setCrewIds] = useState<string[]>([]);
   const [splitBusy, setSplitBusy] = useState(false);
+  const [meetingsOpen, setMeetingsOpen] = useState(false);
 
   const openList = lists.find((l) => l.id === openId) || null;
   const isMeeting = openList?.kind === "meeting";
+  const isDone = openId === "done" || openList?.kind === "done";
+  const crewNames = crewIds
+    .map((id) => agents.find((a) => a.id === id)?.name)
+    .filter(Boolean) as string[];
 
   async function loadLists() {
     try {
       const data = await fetch(`${API_URL}/api/lists`).then((r) => r.json());
       setLists(data.lists || []);
       setMeetingsFound(data.meetings ? Boolean(data.meetings.found) : null);
+      setCodeRead(Boolean(data.code_read));
       setError(null);
-      setOpenId((cur) => {
-        if (cur && (data.lists || []).some((l: TaskList) => l.id === cur)) return cur;
-        return data.lists?.[0]?.id || "inbox";
-      });
+      const ids = (data.lists || []).map((l: TaskList) => l.id);
+      if (!ids.includes(openIdRef.current)) setOpenListId(data.lists?.[0]?.id || "inbox");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load lists");
     }
@@ -121,11 +128,10 @@ export function ListsSidebar({
 
   useEffect(() => {
     setPicked([]);
-  }, [openId]);
-
-  useEffect(() => {
-    setOpenListId(openId || "inbox");
-  }, [openId, setOpenListId]);
+    setCrewFor(null);
+    setCrewIds([]);
+    if (openList?.kind === "meeting") setMeetingsOpen(true);
+  }, [openId, openList?.kind]);
 
   useEffect(() => {
     loadItems(openId);
@@ -152,11 +158,12 @@ export function ListsSidebar({
   }, [openList?.project?.id, taskTick]);
 
   const visible = useMemo(() => {
-    const base = isMeeting && mine ? items.filter((item) => item.mine) : items;
+    let base = isMeeting && mine ? items.filter((item) => item.mine) : items;
+    if (!isDone) base = base.filter((item) => item.status !== "done");
     const q = query.trim().toLowerCase();
     if (!q) return base;
     return base.filter((item) => item.text.toLowerCase().includes(q));
-  }, [items, isMeeting, mine, query]);
+  }, [items, isMeeting, isDone, mine, query]);
 
   const visibleIds = useMemo(() => visible.map((item) => item.id), [visible]);
   const allPicked = visibleIds.length > 0 && visibleIds.every((id) => picked.includes(id));
@@ -176,9 +183,7 @@ export function ListsSidebar({
     if (!confirm(`Delete ${ids.length} task${ids.length === 1 ? "" : "s"}?`)) return;
     setRemoving(true);
     try {
-      await Promise.all(
-        ids.map((id) => fetch(`${API_URL}/api/items/${id}`, { method: "DELETE" }))
-      );
+      await Promise.all(ids.map((id) => fetch(`${API_URL}/api/items/${id}`, { method: "DELETE" })));
       setPicked([]);
       await loadItems(openId);
       await loadLists();
@@ -245,6 +250,13 @@ export function ListsSidebar({
     setLinking(false);
     setLinkError(null);
     await loadLists();
+    setSyncing(true);
+    try {
+      await fetch(`${API_URL}/api/projects/${projectId}/sync`, { method: "POST" });
+      await loadLists();
+    } finally {
+      setSyncing(false);
+    }
   }
 
   async function unlinkProject() {
@@ -284,13 +296,13 @@ export function ListsSidebar({
     setNewTitle("");
     setCreating(false);
     await loadLists();
-    if (created?.id) setOpenId(created.id);
+    if (created?.id) setOpenListId(created.id);
   }
 
   async function addTask(e: FormEvent) {
     e.preventDefault();
     const text = draft.trim();
-    if (!text || !openId) return;
+    if (!text || !openId || isDone) return;
     await fetch(`${API_URL}/api/lists/${openId}/items`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -305,11 +317,16 @@ export function ListsSidebar({
     if (list.kind !== "custom") return;
     if (!confirm(`Delete “${list.title}”?`)) return;
     await fetch(`${API_URL}/api/lists/${list.id}`, { method: "DELETE" });
-    if (openId === list.id) setOpenId("inbox");
+    if (openId === list.id) setOpenListId("inbox");
     await loadLists();
   }
 
   async function onItemClick(item: ListItem) {
+    if (isDone || item.virtual || item.id.startsWith("done-")) {
+      if (item.agent_id) select(item.agent_id);
+      if (item.job_id && item.artifact) openPreview(item.job_id, item.artifact);
+      return;
+    }
     if (item.status === "open" || item.status === "blocked") {
       const desk = agents.find((a) => a.id === selectedId);
       const fallback = pickBestAgent(agents, item.suggested);
@@ -357,11 +374,11 @@ export function ListsSidebar({
   }
 
   return (
-    <aside className="flex h-full min-h-0 w-[320px] shrink-0 flex-col overflow-hidden rounded-[28px] bg-white/70">
-      <div className="flex shrink-0 items-center justify-between px-5 py-4">
-        <h1 className="text-sm font-semibold tracking-tight">Lists</h1>
-        <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setCreating(true)}>
-          New list
+    <aside className="flex h-full min-h-0 w-full min-w-0 shrink-0 flex-col overflow-hidden rounded-[28px] bg-white/55 lg:w-[20rem]">
+      <div className="flex shrink-0 items-center justify-between px-4 py-3">
+        <h1 className="display text-[1.35rem] leading-none">Lists</h1>
+        <button type="button" className="btn btn-compact px-3" onClick={() => setCreating(true)} aria-label="New list">
+          New
         </button>
       </div>
       {creating && (
@@ -379,85 +396,48 @@ export function ListsSidebar({
         </form>
       )}
 
-      <div className="min-h-0 flex-[0.42] overflow-auto">
-        {error && <p className="px-5 py-3 text-sm text-[#b42318]">{error}</p>}
-        {shelf.length > 0 && (
-          <div className="px-3 pb-2">
-            {shelf.map((project) => (
-              <div key={project.id} className="mb-1 flex w-full items-center gap-2 rounded-2xl bg-white px-3 py-2">
-                <button
-                  type="button"
-                  className="min-w-0 flex-1 text-left"
-                  onClick={() => {
-                    if (!openList?.project) attachExisting(project.id);
-                  }}
-                >
-                  <span className="block truncate text-sm font-medium">{project.title || project.name}</span>
-                  <span className="text-[11px] text-[var(--ink-soft)]">
-                    {project.repos?.length || 1} repo{(project.repos?.length || 1) === 1 ? "" : "s"}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="shrink-0 text-[11px] text-[var(--ink-soft)] underline"
-                  disabled={syncing}
-                  onClick={async () => {
-                    setSyncing(true);
-                    try {
-                      await fetch(`${API_URL}/api/projects/${project.id}/sync`, { method: "POST" });
-                      await loadShelf();
-                      await loadLists();
-                    } finally {
-                      setSyncing(false);
-                    }
-                  }}
-                >
-                  Sync
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+      <div className="min-h-0 shrink-0 overflow-auto px-2 pb-1" style={{ maxHeight: meetingsOpen ? "38%" : "10.5rem" }}>
+        {error && <p className="px-3 py-3 text-sm text-[#b42318]">{error}</p>}
         {yours.map((list) => (
           <ListRow
             key={list.id}
             list={list}
             open={openId === list.id}
-            onOpen={() => setOpenId(list.id)}
+            onOpen={() => setOpenListId(list.id)}
             onDelete={list.kind === "custom" ? () => removeList(list) : undefined}
-            onCode={
-              openId === list.id && !list.project
-                ? () => setLinking((open) => !open)
-                : undefined
-            }
           />
         ))}
         {meetings.length > 0 && (
-          <p className="px-5 pb-1 pt-4 text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--ink-soft)]">
-            Meetings
-          </p>
+          <button
+            type="button"
+            aria-expanded={meetingsOpen}
+            className={`mt-1 flex w-full items-center gap-2 rounded-2xl px-3 py-2 text-left ${
+              meetingsOpen ? "bg-white shadow-sm" : "hover:bg-white/80"
+            }`}
+            onClick={() => setMeetingsOpen((open) => !open)}
+          >
+            <span className="w-3 text-[11px] text-[var(--ink-soft)]" aria-hidden>
+              {meetingsOpen ? "▾" : "▸"}
+            </span>
+            <span className="text-[11px] font-medium uppercase tracking-[0.16em] text-[var(--ink)]">
+              Meetings
+            </span>
+            <span className="ml-auto rounded-full bg-[var(--paper)] px-2 py-0.5 text-[11px] text-[var(--ink-soft)]">
+              {meetingsOpen ? "Hide" : meetings.length}
+            </span>
+          </button>
         )}
-        {meetingsFound === false && (
-          <p className="px-5 py-3 text-sm text-[var(--ink-soft)]">Meeting notes are not on this machine.</p>
+        {meetingsOpen && meetingsFound === false && (
+          <p className="px-3 py-3 text-sm text-[var(--ink-soft)]">Meeting notes are not on this machine.</p>
         )}
-        {meetings.map((list) => (
-          <ListRow
-            key={list.id}
-            list={list}
-            open={openId === list.id}
-            onOpen={() => setOpenId(list.id)}
-            onCode={
-              openId === list.id && !list.project
-                ? () => setLinking((open) => !open)
-                : undefined
-            }
-          />
-        ))}
+        {meetingsOpen &&
+          meetings.map((list) => (
+            <ListRow key={list.id} list={list} open={openId === list.id} onOpen={() => setOpenListId(list.id)} />
+          ))}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--line)]">
-        {(picking || isMeeting || openList?.project) && (
-        <div className="flex shrink-0 items-center justify-between gap-2 px-4 py-2">
+        <div className="flex shrink-0 items-center justify-between gap-2 px-4 py-2.5">
           {picking ? (
             <>
               <div className="flex min-w-0 items-center gap-2">
@@ -468,42 +448,64 @@ export function ListsSidebar({
                 />
                 <p className="text-sm">{picked.length} selected</p>
               </div>
-              <button type="button" className="text-xs text-[var(--ink-soft)] underline" disabled={removing} onClick={removePicked}>
+              <button type="button" className="btn btn-compact px-2.5" disabled={removing} onClick={removePicked}>
                 Delete
               </button>
             </>
           ) : (
             <>
-              <p className="min-w-0 truncate text-[11px] text-[var(--ink-soft)]">
-                {openList?.project
-                  ? `${openList.project.title || openList.project.name}${
-                      openList.project.repos?.length ? ` · ${openList.project.repos.length} repo` : ""
-                    }${openList.project.branch ? ` · ${openList.project.branch}` : ""}`
-                  : ""}
-              </p>
-              <div className="flex shrink-0 items-center gap-3">
+              <div className="min-w-0">
+                <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-[var(--ink-soft)]">
+                  Open list
+                </p>
+                <p className="truncate text-sm font-medium">{openList?.title || "Inbox"}</p>
                 {openList?.project && (
-                  <>
-                    <button type="button" className="text-[11px] text-[var(--ink-soft)] underline" disabled={syncing} onClick={refreshCode}>
-                      {syncing ? "Refreshing…" : "Refresh"}
-                    </button>
-                    <button type="button" className="text-[11px] text-[var(--ink-soft)] underline" onClick={unlinkProject}>
-                      Remove
-                    </button>
-                  </>
+                  <p className="truncate text-[11px] text-[var(--ink-soft)]">
+                    {openList.project.title || openList.project.name}
+                    {ledger[0] ? ` · ${ledger[0].agent_name}` : ""}
+                  </p>
                 )}
-                {isMeeting && (
-                  <div className="flex rounded-full bg-[var(--paper-deep)] p-0.5 text-xs">
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {!isDone && openList?.project ? (
+                  <>
                     <button
                       type="button"
-                      className={`rounded-full px-2.5 py-1 ${mine ? "bg-white" : "text-[var(--ink-soft)]"}`}
+                      className="btn btn-compact px-2.5"
+                      disabled={syncing}
+                      onClick={refreshCode}
+                    >
+                      {syncing ? "Syncing…" : "Sync"}
+                    </button>
+                    <button type="button" className="btn btn-compact px-2.5" onClick={unlinkProject}>
+                      Unlink
+                    </button>
+                  </>
+                ) : !isDone ? (
+                  <button
+                    type="button"
+                    className={`btn btn-compact px-2.5 ${linking ? "btn-solid" : ""}`}
+                    aria-pressed={linking}
+                    aria-expanded={linking}
+                    onClick={() => setLinking((open) => !open)}
+                  >
+                    {linking ? "Cancel" : "Link code"}
+                  </button>
+                ) : null}
+                {isMeeting && (
+                  <div className="flex rounded-full border border-[rgba(28,24,20,0.12)] bg-white p-0.5">
+                    <button
+                      type="button"
+                      className={`btn btn-compact min-h-8 px-2.5 py-1 ${mine ? "btn-solid" : "border-transparent bg-transparent shadow-none"}`}
+                      aria-pressed={mine}
                       onClick={() => setMine(true)}
                     >
                       Mine
                     </button>
                     <button
                       type="button"
-                      className={`rounded-full px-2.5 py-1 ${!mine ? "bg-white" : "text-[var(--ink-soft)]"}`}
+                      className={`btn btn-compact min-h-8 px-2.5 py-1 ${!mine ? "btn-solid" : "border-transparent bg-transparent shadow-none"}`}
+                      aria-pressed={!mine}
                       onClick={() => setMine(false)}
                     >
                       All
@@ -514,23 +516,18 @@ export function ListsSidebar({
             </>
           )}
         </div>
-        )}
         {openList?.project?.sync_error && (
-          <p className="px-5 pb-2 pl-11 text-xs text-[#b42318]">{openList.project.sync_error}</p>
+          <p className="px-4 pb-2 text-xs leading-4 text-[#b42318]">{openList.project.sync_error}</p>
         )}
-        {ledger.length > 0 && (
-          <div className="px-4 pb-2">
-            {ledger.map((row) => (
-              <p key={row.id} className="truncate text-[11px] text-[var(--ink-soft)]">
-                {row.agent_name}: {row.task}
-              </p>
-            ))}
-          </div>
-        )}
-        {linking && !openList?.project && (
+        {linking && !openList?.project && !isDone && (
           <form onSubmit={saveLink} className="mx-4 mb-3 shrink-0 rounded-2xl bg-white px-3 py-3">
             <p className="text-sm">Paste the repository link</p>
             {linkError && <p className="mt-1 text-xs text-[#b42318]">{linkError}</p>}
+            {!codeRead && (
+              <p className="mt-1 text-[11px] leading-4 text-[var(--ink-soft)]">
+                The list will still link. To pull files, add AZURE_DEVOPS_PAT to apps/api/.env, then press Sync.
+              </p>
+            )}
             {shelf.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
                 {shelf.map((project) => (
@@ -546,7 +543,7 @@ export function ListsSidebar({
               </div>
             )}
             <p className="mt-1 text-[11px] leading-4 text-[var(--ink-soft)]">
-              In Azure DevOps, open the repo and copy the address bar. It looks like
+              In Azure DevOps, copy the address bar. It looks like
               dev.azure.com/your-company/Stormcast/_git/Stormcast
             </p>
             <input
@@ -600,7 +597,7 @@ export function ListsSidebar({
               </button>
               <button
                 type="button"
-                className="ml-auto text-[11px] text-[var(--ink-soft)] underline"
+                className="ml-auto text-[11px] text-[var(--ink-soft)]"
                 onClick={() => setManual((open) => !open)}
               >
                 {manual ? "Paste a link instead" : "Type the names"}
@@ -608,7 +605,7 @@ export function ListsSidebar({
             </div>
           </form>
         )}
-        <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
+        <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-2">
           {items.length > 4 && (
             <input
               value={query}
@@ -623,11 +620,35 @@ export function ListsSidebar({
             </p>
           )}
           {visible.map((item) => {
-            const best = pickBestAgent(agents, item.suggested);
             const assigned = agents.find((a) => a.id === item.agent_id);
-            const desk = agents.find((a) => a.id === selectedId);
             const chosen = picked.includes(item.id);
-            const shown = assigned || desk || best;
+            const open = item.status === "open" || item.status === "blocked";
+            const done = item.status === "done";
+            const working = item.status === "working" || item.status === "assigned";
+            const crewHere = crewFor === item.id;
+            if (isDone) {
+              return (
+                <article
+                  key={item.id}
+                  onClick={() => onItemClick(item)}
+                  className="group mb-0.5 min-w-0 cursor-pointer rounded-2xl px-2.5 py-2 hover:bg-white/70"
+                >
+                  <p className="min-w-0 text-sm leading-5 [overflow-wrap:anywhere]">{item.text}</p>
+                  <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                    {assigned && (
+                      <span className="text-[12px] font-medium" style={{ color: assigned.pigment || undefined }}>
+                        {assigned.name}
+                      </span>
+                    )}
+                    {item.artifact ? (
+                      <span className="text-[12px] text-[var(--ink-soft)]">View</span>
+                    ) : item.recap ? (
+                      <span className="line-clamp-3 text-[12px] leading-4 text-[var(--ink-soft)]">{item.recap}</span>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            }
             return (
               <article
                 key={item.id}
@@ -650,45 +671,43 @@ export function ListsSidebar({
                     togglePick(item.id);
                     return;
                   }
-                  if (item.status === "open" || item.status === "blocked") return;
+                  if (open) return;
                   onItemClick(item);
                 }}
-                className={`mb-2 rounded-2xl px-3 py-3 hover:bg-white ${
+                className={`group mb-0.5 min-w-0 rounded-2xl px-2.5 py-2 ${
                   picking ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"
-                } ${chosen ? "bg-white" : ""}`}
+                } ${chosen || crewHere ? "bg-white" : "hover:bg-white/70"} ${done ? "opacity-45" : ""}`}
               >
                 <div className="flex items-start gap-2">
-                  <SelectCircle
-                    checked={chosen}
-                    label={chosen ? `Deselect ${item.text}` : `Select ${item.text}`}
-                    onToggle={() => togglePick(item.id)}
-                  />
-                  <StatusMark status={item.status} />
-                  <p className="line-clamp-2 flex-1 text-sm leading-5">{item.text}</p>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2 pl-11">
-                  <span className="text-[11px] text-[var(--ink-soft)]">
-                    {item.status === "open"
-                      ? strengthLabel(item.suggested)
-                      : item.status === "done"
-                        ? "Done"
-                        : item.status === "blocked"
-                          ? "Needs attention"
-                          : "On a desk"}
+                  <span className={picking || chosen ? "" : "opacity-40 group-hover:opacity-100"}>
+                    <SelectCircle
+                      checked={chosen}
+                      label={chosen ? `Deselect ${item.text}` : `Select ${item.text}`}
+                      onToggle={() => togglePick(item.id)}
+                    />
                   </span>
-                  {shown && (
-                    <span
-                      className="text-[11px] font-medium"
-                      style={{ color: shown.pigment || undefined }}
-                    >
-                      {shown.name}
+                  <StatusMark status={item.status} />
+                  <p className="min-w-0 flex-1 text-sm leading-5 [overflow-wrap:anywhere]">{item.text}</p>
+                </div>
+                <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 pl-11">
+                  {working && assigned && (
+                    <span className="mr-1 text-[12px] font-medium" style={{ color: assigned.pigment || undefined }}>
+                      {assigned.name}
                     </span>
                   )}
-                  {(item.status === "open" || item.status === "blocked") && (
-                    <div className="flex shrink-0 items-center gap-2">
+                  {done && (
+                    <span className="mr-1 text-[12px] text-[var(--ink-soft)]">
+                      Done{assigned ? ` · ${assigned.name}` : ""}
+                    </span>
+                  )}
+                  {item.status === "blocked" && (
+                    <span className="mr-1 text-[12px] text-[#b42318]">Needs attention</span>
+                  )}
+                  {open && !picking && (
+                    <>
                       <button
                         type="button"
-                        className="text-[11px] text-[var(--ink-soft)] underline"
+                        className="btn btn-compact btn-solid"
                         onClick={(e) => {
                           e.stopPropagation();
                           onItemClick(item);
@@ -698,54 +717,67 @@ export function ListsSidebar({
                       </button>
                       <button
                         type="button"
-                        className="text-[11px] text-[var(--ink-soft)] underline"
+                        className={`btn btn-compact ${crewHere ? "btn-solid" : ""}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           setCrewFor((cur) => (cur === item.id ? null : item.id));
+                          setCrewIds([]);
                         }}
                       >
                         Crew
                       </button>
                       <button
                         type="button"
-                        className="text-[11px] text-[var(--ink-soft)] underline"
+                        className="btn btn-compact"
                         disabled={splitBusy}
+                        title="Split a 1 / 2 / 3 list onto desks in that order"
                         onClick={(e) => {
                           e.stopPropagation();
                           splitItem(item);
                         }}
                       >
-                        Let the floor split it
+                        Split
                       </button>
-                    </div>
+                    </>
                   )}
                 </div>
-                {crewFor === item.id && (item.status === "open" || item.status === "blocked") && (
-                  <div className="mt-2 pl-11">
-                    <p className="text-[11px] text-[var(--ink-soft)]">Crew, in order — up to four desks</p>
-                    <div className="mt-1 flex flex-wrap gap-1">
+                {crewHere && open && (
+                  <div className="mt-3 rounded-2xl bg-[var(--paper)] px-3 py-3">
+                    <p className="text-[11px] text-[var(--ink-soft)]">
+                      Tap desks in order. 1st desk gets item 1, 2nd gets item 2.
+                    </p>
+                    {crewNames.length > 0 && (
+                      <p className="mt-1 text-sm leading-5">{crewNames.join(" → ")}</p>
+                    )}
+                    <div className="mt-2 flex flex-wrap gap-1.5">
                       {agents.map((agent) => {
                         const on = crewIds.includes(agent.id);
+                        const n = crewIds.indexOf(agent.id) + 1;
                         return (
                           <button
                             key={agent.id}
                             type="button"
-                            className={`rounded-full px-2 py-0.5 text-[11px] ${on ? "bg-[var(--ink)] text-white" : "bg-white"}`}
+                            className={`btn btn-compact ${on ? "btn-solid" : ""}`}
                             onClick={(e) => {
                               e.stopPropagation();
                               setCrewIds((cur) =>
-                                on ? cur.filter((id) => id !== agent.id) : cur.length >= 4 ? cur : [...cur, agent.id]
+                                on
+                                  ? cur.filter((id) => id !== agent.id)
+                                  : cur.length >= 4
+                                    ? cur
+                                    : [...cur, agent.id]
                               );
                             }}
                           >
-                            {agent.name}
+                            {on ? `${n}. ${agent.name}` : agent.name}
                           </button>
                         );
                       })}
                     </div>
                     <button
                       type="button"
-                      className="mt-2 text-[11px] underline"
+                      className="btn btn-solid mt-3 w-full"
+                      disabled={crewIds.length === 0}
                       onClick={(e) => {
                         e.stopPropagation();
                         assignCrew(item);
@@ -759,6 +791,7 @@ export function ListsSidebar({
             );
           })}
         </div>
+        {!isDone && (
         <form onSubmit={addTask} className="shrink-0 border-t border-[var(--line)] p-3">
           <input
             value={draft}
@@ -767,6 +800,7 @@ export function ListsSidebar({
             className="w-full rounded-full bg-white px-4 py-2 text-sm outline-none"
           />
         </form>
+        )}
       </div>
     </aside>
   );
@@ -777,40 +811,38 @@ function ListRow({
   open,
   onOpen,
   onDelete,
-  onCode,
 }: {
   list: TaskList;
   open: boolean;
   onOpen: () => void;
   onDelete?: () => void;
-  onCode?: () => void;
 }) {
-  const count = list.open_count + list.working_count;
+  const count = list.kind === "done" ? list.item_count : list.open_count + list.working_count;
   return (
-    <div
-      className="flex w-full items-center gap-2 border-b border-[var(--line)] px-3 py-1"
-      style={{
-        background: open ? "color-mix(in srgb, var(--paper) 70%, white)" : undefined,
-      }}
-    >
-      <button type="button" onClick={onOpen} className="min-w-0 flex-1 px-2 py-2.5 text-left">
-        <span className="block truncate text-sm font-medium">{list.title}</span>
-        {list.project && (
-          <span className="mt-0.5 block truncate text-[11px] text-[var(--ink-soft)]">
-            {list.project.title || list.project.name}
+    <div className="flex w-full items-center gap-0.5">
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-current={open ? "true" : undefined}
+        className={`flex min-w-0 flex-1 items-center gap-2 rounded-2xl px-3 py-2 text-left ${
+          open ? "bg-[var(--ink)] text-white shadow-sm" : "hover:bg-white"
+        }`}
+      >
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{list.title}</span>
+        {count ? (
+          <span
+            className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] tabular-nums ${
+              open ? "bg-white/15 text-white" : "bg-white text-[var(--ink-soft)]"
+            }`}
+          >
+            {count}
           </span>
-        )}
+        ) : null}
       </button>
-      {onCode && (
-        <button type="button" className="shrink-0 text-[11px] text-[var(--ink-soft)]" onClick={onCode}>
-          Code
-        </button>
-      )}
-      <span className="shrink-0 pr-1 text-xs text-[var(--ink-soft)]">{count || ""}</span>
       {onDelete && (
         <button
           type="button"
-          className="shrink-0 px-1 text-xs text-[var(--ink-soft)]"
+          className="btn btn-compact h-9 w-9 shrink-0 px-0"
           onClick={onDelete}
           aria-label={`Delete ${list.title}`}
         >
@@ -845,9 +877,11 @@ function SelectCircle({
         e.stopPropagation();
         onToggle();
       }}
-      className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[rgba(28,24,20,0.28)] bg-white"
+      className="relative flex h-11 w-11 shrink-0 items-center justify-center"
     >
-      {checked ? <span className="block h-2 w-2 rounded-full bg-[var(--ink)]" /> : null}
+      <span className="flex h-4 w-4 items-center justify-center rounded-full border border-[rgba(28,24,20,0.28)] bg-white">
+        {checked ? <span className="block h-2 w-2 rounded-full bg-[var(--ink)]" /> : null}
+      </span>
     </button>
   );
 }
