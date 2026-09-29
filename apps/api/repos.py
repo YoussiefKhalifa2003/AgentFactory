@@ -8,7 +8,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 import db
+
+ENV_FILE = Path(__file__).resolve().parent / ".env"
+# Read on each sync so a token added to .env is picked up without a restart.
+MISSING_PAT = (
+    "Add AZURE_DEVOPS_PAT to apps/api/.env (code-read scope), then press Sync."
+)
 
 SKIP_DIRS = {
     ".git",
@@ -94,55 +102,104 @@ def remote_url(project: dict, repository: str | None = None) -> str:
     return f"https://dev.azure.com/{org}/{name}/_git/{repo}"
 
 
+def _pat() -> str:
+    env_pat = (os.getenv("AZURE_DEVOPS_PAT") or "").strip()
+    file_pat = (dotenv_values(ENV_FILE).get("AZURE_DEVOPS_PAT") or "").strip()
+    return env_pat or file_pat
+
+
+def has_pat() -> bool:
+    return bool(_pat())
+
+
 def _auth_header() -> str | None:
-    pat = (os.getenv("AZURE_DEVOPS_PAT") or "").strip()
+    pat = _pat()
     if not pat:
         return None
     token = base64.b64encode(f":{pat}".encode()).decode()
     return f"Authorization: Basic {token}"
 
 
-def _git(header: str, args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    cmd = ["git", "-c", f"http.extraHeader={header}", *args]
+def _redact(text: str) -> str:
+    pat = _pat()
+    if pat:
+        text = text.replace(pat, "…")
+    return text[:400]
+
+
+def _looks_like_auth(message: str) -> bool:
+    blob = message.lower()
+    return any(
+        mark in blob
+        for mark in (
+            "authentication failed",
+            "could not read username",
+            "terminal prompts disabled",
+            "401",
+            "403",
+            "tf401019",
+            "tf401027",
+            "access denied",
+            "not authorized",
+            "fatal: could not read",
+            "invalid credentials",
+        )
+    )
+
+
+def _git(
+    args: list[str],
+    cwd: Path | None = None,
+    header: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    cmd = ["git"]
+    if header:
+        cmd += ["-c", f"http.extraHeader={header}"]
+    cmd += args
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    env.pop("AZURE_DEVOPS_PAT", None)
     return subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         timeout=120,
+        env=env,
     )
 
 
-def _sync_one(header: str, url: str, branch: str, root: Path) -> None:
+def _sync_one(header: str | None, url: str, branch: str, root: Path) -> None:
     if (root / ".git").is_dir():
-        fetched = _git(header, ["fetch", "--depth", "1", "origin", branch], root)
+        fetched = _git(["fetch", "--depth", "1", "origin", branch], root, header=header)
         if fetched.returncode != 0:
-            raise RuntimeError((fetched.stderr or fetched.stdout or "fetch failed")[:400])
-        checked = _git(header, ["checkout", "-f", "FETCH_HEAD"], root)
+            raise RuntimeError(_redact(fetched.stderr or fetched.stdout or "fetch failed"))
+        checked = _git(["checkout", "-f", "FETCH_HEAD"], root, header=header)
         if checked.returncode != 0:
-            raise RuntimeError((checked.stderr or checked.stdout or "checkout failed")[:400])
+            raise RuntimeError(_redact(checked.stderr or checked.stdout or "checkout failed"))
         return
     parent = root.parent
     if root.exists():
         shutil.rmtree(root, ignore_errors=True)
     cloned = _git(
-        header,
         ["clone", "--depth", "1", "--branch", branch, url, str(root)],
         parent,
+        header=header,
     )
     if cloned.returncode != 0:
-        raise RuntimeError((cloned.stderr or cloned.stdout or "clone failed")[:400])
+        raise RuntimeError(_redact(cloned.stderr or cloned.stdout or "clone failed"))
 
 
 def sync(project_id: str) -> dict:
     project = db.get_project(project_id)
     if not project:
         raise KeyError("project not found")
-    header = _auth_header()
-    if not header:
-        return db.update_project(project_id, sync_error="AZURE_DEVOPS_PAT is missing") or project
     if not shutil.which("git"):
         return db.update_project(project_id, sync_error="git is not installed") or project
+    header = _auth_header()
+    if not header:
+        return db.update_project(project_id, sync_error=MISSING_PAT) or project
     rows = db.list_project_repos(project_id)
     if not rows:
         rows = [
@@ -161,7 +218,13 @@ def sync(project_id: str) -> dict:
         try:
             _sync_one(header, url, branch, root)
         except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
-            errors.append(f"{row['repository']}: {str(exc)[:200]}")
+            message = str(exc)
+            if _looks_like_auth(message):
+                errors.append(
+                    f"{row['repository']}: Azure DevOps refused the token. Check AZURE_DEVOPS_PAT in apps/api/.env."
+                )
+            else:
+                errors.append(f"{row['repository']}: {message[:200]}")
     if errors:
         return db.update_project(project_id, sync_error="; ".join(errors)[:400]) or project
     return db.update_project(project_id, synced_at=db.utcnow(), sync_error=None) or project
