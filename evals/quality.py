@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sys
 import tempfile
@@ -12,10 +13,12 @@ sys.path.insert(0, str(ROOT / "apps" / "api"))
 
 import db  # noqa: E402
 import harness  # noqa: E402
+import lists  # noqa: E402
 import local  # noqa: E402
 import memory  # noqa: E402
 import repos  # noqa: E402
 import sandbox  # noqa: E402
+import slides  # noqa: E402
 
 
 PAGE = """<!DOCTYPE html>
@@ -63,6 +66,116 @@ def main() -> int:
         return 1
     if harness._use_tools({"strengths": ["planning"]}, "Write a plan"):
         print("planning received tools")
+        return 1
+    if harness._use_tools({"strengths": ["brief"]}, "Write a brief"):
+        print("brief received tools")
+        return 1
+    if harness._use_tools({"strengths": ["writing"]}, "Draft an email"):
+        print("writing received tools")
+        return 1
+    if not harness._use_tools({"strengths": ["writing", "slides"]}, "Make a deck"):
+        print("slides should get tools")
+        return 1
+    if not harness._use_tools({"strengths": ["review"]}, "Review this"):
+        print("review should get tools")
+        return 1
+    if not harness._use_tools({"strengths": ["qa"]}, "Write tests"):
+        print("qa should get tools")
+        return 1
+    pin = harness._system_prompt(
+        {"name": "Rex", "strengths": ["review", "pdf"], "instructions": "", "description": ""}
+    )
+    if "PRIMARY SKILL" not in pin or "This is a review job" not in pin:
+        print("primary review pack missing")
+        return 1
+    if "a review specialist" not in pin:
+        print("review specialist line missing")
+        return 1
+
+    raw_deck = """<style>.ugly{color:purple}</style>
+<section class="slide"><h2>One</h2><ul><li>A</li></ul></section>
+<section class="slide"><h2>Two</h2></section>
+"""
+    wrapped = slides.wrap_deck(raw_deck)
+    if slides.MARKER not in wrapped:
+        print("deck missing marker")
+        return 1
+    if "--paper:" not in wrapped or "Georgia" not in wrapped:
+        print("deck missing template css")
+        return 1
+    if wrapped.lower().count("<section") != 2:
+        print("deck lost sections", wrapped.lower().count("<section"))
+        return 1
+    if ".ugly" in wrapped or "purple" in wrapped:
+        print("deck kept model css")
+        return 1
+    again = slides.wrap_deck(wrapped)
+    if again.count(slides.MARKER) != 1:
+        print("deck nested", again.count(slides.MARKER))
+        return 1
+    if again.lower().count("<section") != 2:
+        print("second wrap lost sections")
+        return 1
+
+    async def _write_pages(ws: Path) -> str | None:
+        await harness._call_tool(ws, "write_file", {"path": "index.html", "content": PAGE})
+        page_body = sandbox.read_file(ws, "index.html")
+        if slides.MARKER in page_body or "--paper:" in page_body:
+            return "index.html was wrapped"
+        if "start-btn" not in page_body:
+            return "index.html lost"
+        await harness._call_tool(ws, "write_file", {"path": "slides.html", "content": raw_deck})
+        deck_body = sandbox.read_file(ws, "slides.html")
+        if slides.MARKER not in deck_body:
+            return "slides.html not wrapped"
+        return None
+
+    with tempfile.TemporaryDirectory() as deck_raw:
+        note = asyncio.run(_write_pages(Path(deck_raw)))
+        if note:
+            print(note)
+            return 1
+
+    with tempfile.TemporaryDirectory() as skill_raw:
+        skill_ws = Path(skill_raw)
+        ok, _ = harness._verify({"strengths": ["qa"]}, skill_ws, "tests", "looks good")
+        if ok:
+            print("qa passed without tests")
+            return 1
+        sandbox.write_file(skill_ws, "test_main.py", "print('OK')")
+        ok, note = harness._verify({"strengths": ["qa"]}, skill_ws, "tests", "ok")
+        if not ok:
+            print("qa should pass when tests run", note)
+            return 1
+        ok, _ = harness._verify(
+            {"strengths": ["review"]},
+            skill_ws,
+            "review",
+            "## Verdict\nShip.\n## Findings\n1. **nit** — none. No issues.\n",
+        )
+        if not ok:
+            print("review should pass on findings")
+            return 1
+        ok, _ = harness._verify(
+            {"strengths": ["brief"]},
+            skill_ws,
+            "brief",
+            "## Situation\nShipped.\n## So-what\nWe can demo.\n## Ask\nApprove Friday.\n## Next\nSend the deck.\n",
+        )
+        if not ok:
+            print("brief should pass on the four headings")
+            return 1
+
+    import meetings
+
+    if meetings._suggest_strength("code review the PR") != "review":
+        print("suggest review failed")
+        return 1
+    if meetings._suggest_strength("write tests for coverage") != "qa":
+        print("suggest qa failed")
+        return 1
+    if meetings._suggest_strength("status update for leadership") != "brief":
+        print("suggest brief failed")
         return 1
 
     db.init_db()
@@ -144,6 +257,9 @@ def main() -> int:
         if "Stormcast floor check" in other_prompt:
             print("other project saw Stormcast floor")
             return 1
+        if "apps/api/.env" not in repos.MISSING_PAT:
+            print("pat copy should name the env file")
+            return 1
         if repos.read_file(storm["id"], "../.env") != "error: path refused":
             print("path escape was allowed")
             return 1
@@ -205,6 +321,23 @@ def main() -> int:
         if strengths != ["research", "planning", "coding"]:
             print("foreman split strengths", strengths)
             return 1
+        listed = boss.plan(
+            "1. research about tatweer\n2. write me a simple html restaurant website\n3. plan me ERDC phase 2"
+        )
+        listed_bits = [step["prompt"].split("\n\n", 1)[-1] for step in listed]
+        if listed_bits != [
+            "research about tatweer",
+            "write me a simple html restaurant website",
+            "plan me ERDC phase 2",
+        ]:
+            print("numbered split prompts", listed_bits)
+            return 1
+        if any(step.get("inherit") or step.get("depends_on") is not None for step in listed):
+            print("numbered split should be independent", listed)
+            return 1
+        if [step["strength"] for step in listed] != ["research", "coding", "planning"]:
+            print("numbered split strengths", [step["strength"] for step in listed])
+            return 1
     finally:
         db.delete_project(other["id"])
         with db._lock:
@@ -215,6 +348,48 @@ def main() -> int:
             con.close()
         shutil.rmtree(repos.cache_dir(storm["id"]), ignore_errors=True)
         db.delete_project(storm["id"])
+
+    try:
+        board = lists.get_list_payload("done")
+        if not board or board.get("kind") != "done":
+            print("done list missing")
+            return 1
+        try:
+            lists.add_item("done", "should fail")
+            print("done accepted an item")
+            return 1
+        except ValueError:
+            pass
+        try:
+            db.create_list({"id": "done", "title": "Nope", "kind": "custom"})
+            print("created a list named done")
+            return 1
+        except ValueError:
+            pass
+        agent_row = (db.list_agents() or [None])[0]
+        if agent_row:
+            job = db.create_job(agent_row["id"], "Task: ship the recap")
+            db.update_job(job["id"], status="done", output="First line.\nSecond line.\nThird.")
+            payload = lists.get_list_payload("done") or {}
+            hit = next((row for row in payload.get("items") or [] if row.get("job_id") == job["id"]), None)
+            if not hit:
+                print("done missing finished job")
+                return 1
+            if hit.get("text") != "ship the recap":
+                print("done title", hit.get("text"))
+                return 1
+            if "First line" not in (hit.get("recap") or ""):
+                print("done recap", hit.get("recap"))
+                return 1
+            with db._lock:
+                con = db.connect()
+                con.execute("DELETE FROM artifacts WHERE job_id=?", (job["id"],))
+                con.execute("DELETE FROM jobs WHERE id=?", (job["id"],))
+                con.commit()
+                con.close()
+    except Exception as err:
+        print("done list check failed", err)
+        return 1
 
     print("quality ok")
     return 0
