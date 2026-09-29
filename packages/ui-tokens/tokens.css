@@ -1,0 +1,25 @@
+/* Source of truth for paper/ink/pigment. Imported by apps/web and AI_HarnessPhone.
+   Change this file, not a one-off copy in either app. */
+
+:root {
+  --paper: #f3eee4;
+  --paper-deep: #e7dfd1;
+  --ink: #1c1814;
+  --ink-soft: #5e574e;
+  --line: rgba(28, 24, 20, 0.1);
+  --glass: rgba(255, 252, 246, 0.62);
+  --ada: #c45e32;
+  --euclid: #178a9a;
+  --scout: #6548c4;
+  --live: #2f7d4a;
+  --alert: #b42318;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
