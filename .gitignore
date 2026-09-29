@@ -9,6 +9,9 @@ apps/api/**/__pycache__/
 apps/web/node_modules/
 apps/web/.next/
 apps/web/out/
+AI_HarnessPhone/node_modules/
+AI_HarnessPhone/.next/
+AI_HarnessPhone/out/
 **/__pycache__/
 *.pyc
 *.db
