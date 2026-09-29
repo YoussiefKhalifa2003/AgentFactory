@@ -21,7 +21,9 @@ import zen
 
 Broadcast = Callable[[dict[str, Any]], None]
 log = logging.getLogger("harness")
-_TOOL_STRENGTHS = {"coding", "maths", "data"}
+_TOOL_STRENGTHS = {"coding", "maths", "data", "review", "qa", "slides"}
+_REVIEW_HEAD = re.compile(r"(?im)^#{1,3}\s+(verdict|findings)\b")
+_SLIDE_MARK = re.compile(r"<section\b[^>]*class\s*=\s*[\"'][^\"']*slide", re.I)
 
 TOOLS = [
     {
@@ -191,15 +193,103 @@ TEXT_PROTOCOL = """
 Write the finished answer only.
 Do not show thinking, plans, or tool JSON.
 Tools are optional. Prefer answering in the reply if a file is not required.
-A website or game needs index.html plus styles.css and script.js, all complete. Write those files. Do not JSON-escape them. Do not put a recap inside the files.
-Games must be playable when the user clicks View. Finish script.js. Wire every Start/Restart button by id. Hide menus with the same CSS class you use to show them. Prefer a complete 2D canvas game over a huge 3D engine that gets cut off. Do not rely on pointer lock. If a file is truncated, write it again in full.
 Use fetch_url only for a normal page the user asked you to open.
 """
+
+CODING_PROTOCOL = """
+This is a coding job. Write real files with write_file. Do not finish with a recap instead of the files.
+Do not show thinking, plans, or tool JSON in the user-facing reply.
+A website or game needs index.html plus styles.css and script.js, all complete. Write those files. Do not JSON-escape them. Do not put a recap inside the files.
+Games must be playable when the user clicks View. Finish script.js. Wire every Start/Restart button by id. Hide menus with the same CSS class you use to show them. Prefer a complete 2D canvas game over a huge 3D engine that gets cut off. Do not rely on pointer lock. If a file is truncated, write it again in full.
+"""
+
+MATHS_PROTOCOL = """
+This is a maths job. Write solution.py then check.py. Run them. Never give a final answer that was not checked.
+Do not show thinking or tool JSON in the user-facing reply.
+"""
+
+DATA_PROTOCOL = """
+This is a data job. Leave a real table, script, or number that you computed. Run scripts you write.
+Do not show thinking or tool JSON in the user-facing reply.
+"""
+
+REVIEW_PROTOCOL = """
+This is a review job. Search the linked repository before you judge. Do not invent files.
+Deliver Verdict plus numbered Findings with severity. Save review.md. Do not rewrite the product unless they asked.
+Do not show thinking or tool JSON in the user-facing reply.
+"""
+
+QA_PROTOCOL = """
+This is a QA job. Write test_main.py (or test_<thing>.py) and run it with run_python. Tests that never ran are a failed job.
+Do not show thinking or tool JSON in the user-facing reply.
+"""
+
+BRIEF_PROTOCOL = """
+This is a brief. Use Situation / So-what / Ask / Next. No tools. No code. No research dump.
+Do not show thinking or tool JSON.
+"""
+
+PLANNING_PROTOCOL = """
+This is a planning job. Put the ordered plan in the reply. Do not call tools.
+Do not show thinking or tool JSON.
+"""
+
+WRITING_PROTOCOL = """
+This is a writing job. The piece in the reply is the deliverable. Do not call tools unless they pasted a URL.
+Do not show thinking or tool JSON.
+"""
+
+RESEARCH_PROTOCOL = """
+This is a research job. Answer first. Fetch a URL only if they pasted one. Cite only what you fetched.
+Do not show thinking or tool JSON in the user-facing reply.
+"""
+
+OPS_PROTOCOL = """
+This is an ops job. Owner, action, due, status. In the reply. No tools.
+Do not show thinking or tool JSON.
+"""
+
+_PROTOCOLS = {
+    "coding": CODING_PROTOCOL,
+    "maths": MATHS_PROTOCOL,
+    "data": DATA_PROTOCOL,
+    "review": REVIEW_PROTOCOL,
+    "qa": QA_PROTOCOL,
+    "brief": BRIEF_PROTOCOL,
+    "planning": PLANNING_PROTOCOL,
+    "writing": WRITING_PROTOCOL,
+    "research": RESEARCH_PROTOCOL,
+    "ops": OPS_PROTOCOL,
+}
+
+
+def _primary_skill(agent: dict[str, Any]) -> str:
+    import strengths as skillset
+
+    domain = skillset.ids()
+    for skill in agent.get("strengths") or []:
+        if skill in domain:
+            return skill
+    return "ops"
+
+
+def _job_protocol(agent: dict[str, Any]) -> str:
+    return _PROTOCOLS.get(_primary_skill(agent), TEXT_PROTOCOL)
 
 
 def _system_prompt(agent: dict[str, Any], project: dict[str, Any] | None = None, job_id: str = "") -> str:
     strengths = agent.get("strengths") or []
-    packs = "\n\n".join(db.skill_text(s) for s in strengths if db.skill_text(s))
+    primary = _primary_skill(agent)
+    primary_body = db.skill_text(primary)
+    extras = [s for s in strengths if s != primary]
+    extra_packs = "\n\n".join(
+        f"### Extra — {s}\n{db.skill_text(s)}" for s in extras if db.skill_text(s)
+    )
+    extra_block = (
+        f"\nEXTRA SKILLS (use only if they help this {primary} job)\n{extra_packs}\n"
+        if extra_packs
+        else ""
+    )
     project_block = ""
     if project:
         import memory
@@ -241,18 +331,20 @@ Search this repository before describing this product. Do not invent files or be
             live = ""
         if live:
             project_block = "\n" + live + "\n"
-    return f"""You are {agent['name']}. You complete jobs.
+    return f"""You are {agent['name']}, a {primary} specialist.
 
 {agent.get('instructions') or ''}
 {agent.get('description') or ''}
-Strengths: {', '.join(strengths) or 'general'}
 
-The user message is the job. Produce the finished deliverable in the reply. Then stop.
+This job is a {primary} job. The PRIMARY pack below is the contract. Follow it first. Extra skills do not change the job type.
 
-{TEXT_PROTOCOL}
+{_job_protocol(agent)}
 
-{packs}
+PRIMARY SKILL — {primary}
+{primary_body}
+{extra_block}
 {project_block}
+The user message is the job. Produce the {primary} deliverable. Then stop.
 """
 
 
@@ -282,6 +374,8 @@ def _is_view_placeholder(text: str) -> bool:
         "sheet is on this desk. use view.",
         "diagram is on this desk. use view.",
         "built a page. use view on this desk.",
+        "review is on this desk. use view.",
+        "slides are on this desk. use view.",
     }
 
 
@@ -347,7 +441,13 @@ async def _call_tool(
 ) -> str:
     try:
         if name == "write_file":
-            rel = sandbox.write_file(ws, args["path"], args.get("content", ""))
+            path = str(args.get("path") or "file")
+            content = str(args.get("content") or "")
+            if Path(path).name.lower() == "slides.html":
+                import slides as deck
+
+                content = deck.wrap_deck(content)
+            rel = sandbox.write_file(ws, path, content)
             return json.dumps({"ok": True, "path": rel})
         if name == "read_file":
             return sandbox.read_file(ws, args["path"])
@@ -439,6 +539,8 @@ def _best_view_artifact(job_id: str) -> dict[str, Any] | None:
             return 0
         if name.endswith(".mmd"):
             return 1
+        if name.endswith("review.md"):
+            return 6
         if kind == "sheet" or name.endswith(".csv"):
             return 2
         if kind == "pack" or name.endswith(".pdf"):
@@ -520,7 +622,7 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
     if gap:
         return False, gap
 
-    if "coding" in strengths:
+    def coding() -> tuple[bool, str]:
         for candidate in ("test_main.py", "main.py"):
             if candidate in files:
                 result = sandbox.run_python(ws, candidate)
@@ -530,7 +632,17 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
                 return False, f"{candidate} ran with errors: {note}"
         return (True, "reply") if output else (False, "empty")
 
-    if "maths" in strengths:
+    def qa() -> tuple[bool, str]:
+        tests = [name for name in files if Path(name).name.startswith("test") and name.endswith(".py")]
+        for candidate in tests:
+            result = sandbox.run_python(ws, candidate)
+            if result["ok"]:
+                return True, f"{candidate} exited 0"
+            note = (result.get("stderr") or result.get("stdout") or "run failed")[:400]
+            return False, f"{candidate} ran with errors: {note}"
+        return False, "qa needs a test_*.py that ran"
+
+    def maths() -> tuple[bool, str]:
         for candidate in ("check.py", "solution.py"):
             if candidate in files:
                 result = sandbox.run_python(ws, candidate)
@@ -540,7 +652,7 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
                 return False, (out or "maths check reported errors")[:400]
         return (True, "reply") if output else (False, "empty")
 
-    if "research" in strengths:
+    def research() -> tuple[bool, str]:
         notes = ""
         for name in files:
             if name.endswith((".md", ".txt")):
@@ -558,6 +670,43 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
             return True, "files"
         return False, "empty"
 
+    def review() -> tuple[bool, str]:
+        notes = ""
+        for name in files:
+            if name.endswith((".md", ".txt")):
+                notes += sandbox.read_file(ws, name) + "\n"
+        blob = f"{notes}\n{output or ''}"
+        if any(Path(name).name == "review.md" for name in files):
+            return True, "review.md"
+        if re.search(r"(?i)(verdict|findings|no issues|blocker|\bseverity\b)", blob) and len(blob.strip()) > 40:
+            return True, "findings"
+        if (output or "").strip() and not _is_view_placeholder(output):
+            return True, "reply"
+        if files:
+            return True, "files"
+        return False, "empty"
+
+    def brief() -> tuple[bool, str]:
+        blob = output or ""
+        if re.search(r"(?im)^#{0,3}\s*(situation|so-what|so what|ask|next)\b", blob):
+            return True, "brief"
+        if len(blob.strip()) > 80:
+            return True, "reply"
+        return (True, "ok") if blob.strip() else (False, "empty")
+
+    checks = {
+        "coding": coding,
+        "qa": qa,
+        "maths": maths,
+        "review": review,
+        "research": research,
+        "brief": brief,
+    }
+    primary = _primary_skill(agent)
+    order = [primary] + [name for name in checks if name != primary]
+    for name in order:
+        if name in strengths and name in checks:
+            return checks[name]()
     return (True, "ok") if output else (False, "empty")
 
 
@@ -864,6 +1013,96 @@ async def _save_pdf(
     return ["pack.pdf"], leftover
 
 
+def _maybe_review_source(text: str) -> str | None:
+    blob = (text or "").strip()
+    if not blob:
+        return None
+    if _REVIEW_HEAD.search(blob) and len(blob) > 40:
+        return blob
+    return None
+
+
+def _maybe_slides_html(text: str) -> str | None:
+    html = local.maybe_html_source(text)
+    blob = html or (text or "").strip()
+    if not blob:
+        return None
+    if _SLIDE_MARK.search(blob) or re.search(r'class\s*=\s*["\']slide["\']', blob, re.I):
+        return blob if "<" in blob else None
+    return html if html and "slide" in html.lower() else None
+
+
+async def _save_review(
+    content: str,
+    leftover: str,
+    ws: Path,
+    job: dict[str, Any],
+    agent: dict[str, Any],
+    broadcast: Broadcast,
+) -> tuple[list[str], str]:
+    for rel, body in local.extract_fences(content):
+        name = Path(rel).name.lower()
+        if name == "review.md" or (rel.endswith(".md") and _maybe_review_source(body)):
+            await _run_named_tool(
+                ws, "write_file", {"path": "review.md", "content": body}, job, agent, broadcast
+            )
+            leftover = local.FENCE.sub("", leftover).strip()
+            leftover = leftover or "Review is on this desk. Use View."
+            return ["review.md"], leftover
+    md = _maybe_review_source(leftover)
+    if md and "review.md" not in sandbox.list_files(ws):
+        await _run_named_tool(
+            ws, "write_file", {"path": "review.md", "content": md}, job, agent, broadcast
+        )
+        leftover = "Review is on this desk. Use View."
+        return ["review.md"], leftover
+    return [], leftover
+
+
+async def _save_slides(
+    content: str,
+    leftover: str,
+    ws: Path,
+    job: dict[str, Any],
+    agent: dict[str, Any],
+    broadcast: Broadcast,
+) -> tuple[list[str], str]:
+    for rel, body in local.extract_fences(content):
+        if rel.endswith((".html", ".htm")) and _maybe_slides_html(body):
+            import slides as deck
+
+            await _run_named_tool(
+                ws,
+                "write_file",
+                {"path": "slides.html", "content": deck.wrap_deck(body)},
+                job,
+                agent,
+                broadcast,
+            )
+            leftover = local.FENCE.sub("", leftover).strip()
+            leftover = leftover or "Slides are on this desk. Use View."
+            return ["slides.html"], leftover
+    html = _maybe_slides_html(leftover)
+    files = sandbox.list_files(ws)
+    has_deck = any(Path(name).name.lower() == "slides.html" for name in files)
+    if html and not has_deck:
+        import slides as deck
+
+        await _run_named_tool(
+            ws,
+            "write_file",
+            {"path": "slides.html", "content": deck.wrap_deck(html)},
+            job,
+            agent,
+            broadcast,
+        )
+        leftover = leftover.replace(html, "").strip() or "Slides are on this desk. Use View."
+        return ["slides.html"], leftover
+    if html and has_deck:
+        leftover = leftover.replace(html, "").strip() or leftover
+    return [], leftover
+
+
 async def _save_desk_files(
     content: str,
     leftover: str,
@@ -872,6 +1111,10 @@ async def _save_desk_files(
     agent: dict[str, Any],
     broadcast: Broadcast,
 ) -> str:
+    if _has_skill(agent, "review"):
+        leftover = (await _save_review(content, leftover, ws, job, agent, broadcast))[1]
+    if _has_skill(agent, "slides"):
+        leftover = (await _save_slides(content, leftover, ws, job, agent, broadcast))[1]
     if _has_skill(agent, "drawio"):
         leftover = (await _save_diagrams(content, leftover, ws, job, agent, broadcast))[1]
     if _has_skill(agent, "spreadsheet"):
@@ -899,7 +1142,7 @@ async def _apply_text_actions(
     leftover = await _save_desk_files(content, leftover, ws, job, agent, broadcast)
 
     strengths = agent.get("strengths") or []
-    if "coding" in strengths or "maths" in strengths:
+    if "coding" in strengths or "maths" in strengths or "qa" in strengths:
         present = set(sandbox.list_files(ws))
         for rel, body in local.extract_fences(content):
             if not rel.endswith((".py", ".md", ".html", ".css", ".js")):
@@ -928,11 +1171,16 @@ async def _apply_text_actions(
             leftover = leftover.replace(html, "").strip() or "Built a page. Use View on this desk."
         local.materialize_site(ws, content)
     py = local.maybe_python_source(leftover)
-    if py and ("coding" in strengths or "maths" in strengths):
-        await _run_named_tool(
-            ws, "write_file", {"path": "main.py", "content": py}, job, agent, broadcast
+    if py and ("coding" in strengths or "maths" in strengths or "qa" in strengths):
+        dest = (
+            "test_main.py"
+            if "qa" in strengths and "coding" not in strengths and "maths" not in strengths
+            else "main.py"
         )
-        transcripts.append("main.py")
+        await _run_named_tool(
+            ws, "write_file", {"path": dest, "content": py}, job, agent, broadcast
+        )
+        transcripts.append(dest)
         leftover = ""
     return transcripts, leftover
 
