@@ -1,0 +1,170 @@
+@import "tailwindcss";
+@import "../../packages/ui-tokens/tokens.css";
+
+@layer base {
+  button {
+    color: unset;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+html,
+body {
+  min-height: 100%;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  background:
+    radial-gradient(700px 380px at 88% -8%, rgba(196, 94, 50, 0.08), transparent 58%),
+    var(--paper);
+  overscroll-behavior: none;
+  overflow-x: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  font-size: 16px;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+h1,
+h2,
+.display {
+  font-family: var(--font-display), Georgia, "Times New Roman", serif;
+  letter-spacing: -0.02em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 22%, white);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0.55rem 1rem;
+  min-height: 2.75rem;
+  font-size: 0.9375rem;
+  font-weight: 550;
+  line-height: 1.2;
+  border: 1px solid rgba(28, 24, 20, 0.12);
+  background: #fff;
+  color: #1c1814;
+  cursor: pointer;
+}
+
+.btn-compact {
+  min-height: 2.75rem;
+  padding: 0.5rem 0.95rem;
+  font-size: 0.875rem;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+}
+
+.btn-solid {
+  background: #1c1814 !important;
+  border-color: #1c1814 !important;
+  color: #fff7ee !important;
+}
+
+.bay {
+  --pigment: var(--ada);
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 10.75rem;
+  flex-direction: column;
+  border-radius: 24px;
+  overflow: hidden;
+}
+
+.bay::before {
+  content: "";
+  position: absolute;
+  inset: auto -20% -40% -20%;
+  height: 70%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--pigment) 35%, transparent), transparent 70%);
+  pointer-events: none;
+}
+
+.bay.is-live {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--pigment) 45%, white),
+    0 28px 60px -24px color-mix(in srgb, var(--pigment) 55%, transparent);
+}
+
+.bay.is-selected {
+  box-shadow:
+    0 0 0 1.5px color-mix(in srgb, var(--pigment) 55%, white),
+    0 18px 36px -24px rgba(28, 24, 20, 0.28);
+}
+
+.bay.is-live.is-selected {
+  box-shadow:
+    0 0 0 1.5px color-mix(in srgb, var(--pigment) 55%, white),
+    0 28px 60px -24px color-mix(in srgb, var(--pigment) 55%, transparent);
+}
+
+@keyframes breathe {
+  50% {
+    transform: scale(1.04);
+    opacity: 0.85;
+  }
+}
+
+.halo {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+.tap {
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.tap:active {
+  transform: scale(0.98);
+}
+
+.sheet {
+  background: #fffdf8;
+  border-radius: 28px 28px 0 0;
+  box-shadow: 0 -24px 60px -32px rgba(28, 24, 20, 0.4);
+  padding-bottom: max(1.75rem, env(safe-area-inset-bottom, 0px));
+}
+
+.hide-scroll {
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hide-scroll::-webkit-scrollbar {
+  display: none;
+}
