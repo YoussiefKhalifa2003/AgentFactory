@@ -107,16 +107,22 @@ def _normalize_steps(raw_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for i, raw in enumerate(raw_steps[:4], start=1):
         agent_id = raw.get("agent_id") or None
         strength = (raw.get("strength") or "ops").strip() or "ops"
-        depends = raw.get("depends_on")
-        if depends is None and i > 1:
+        inherit = bool(raw.get("inherit", True))
+        if "depends_on" in raw:
+            depends = raw.get("depends_on")
+        elif not inherit:
+            depends = None
+        elif i > 1:
             depends = i - 1
+        else:
+            depends = None
         out.append(
             {
                 "agent_id": agent_id,
                 "strength": strength,
                 "prompt": raw.get("prompt") or "",
                 "depends_on": depends,
-                "inherit": bool(raw.get("inherit", True)),
+                "inherit": inherit,
             }
         )
     return out
