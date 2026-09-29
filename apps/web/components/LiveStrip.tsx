@@ -5,21 +5,18 @@ import { API_URL, PlantSnapshot, ShiftNote } from "@/lib/types";
 import { useFactory } from "@/lib/factory";
 
 function Dot({
-  label,
   on,
   busy,
   title,
 }: {
-  label: string;
   on: boolean;
   busy: boolean;
   title: string;
 }) {
   const color = !on ? "#b42318" : busy ? "#2f7d4a" : "rgba(28,24,20,0.28)";
   return (
-    <span className="flex items-center gap-1" title={title}>
-      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
-      <span className="hidden text-[11px] text-[var(--ink-soft)] xl:inline">{label}</span>
+    <span className="flex items-center" title={title}>
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} />
     </span>
   );
 }
@@ -92,10 +89,10 @@ export function PlantDots() {
     : `Spark 2 · ${snap?.spark2?.reason || "offline"}`;
 
   return (
-    <div className="relative flex items-center gap-3">
+    <div className="relative flex items-center gap-2">
       <button
         type="button"
-        className="flex items-center gap-3"
+        className="flex items-center gap-2"
         onClick={() => {
           setOpen((v) => !v);
           loadLatest();
@@ -103,20 +100,17 @@ export function PlantDots() {
         aria-label="Plant and night shift"
       >
         <Dot
-          label="This PC"
           on={Boolean(snap?.local?.ok ?? true)}
           busy={localBusy}
           title={localBusy ? `This PC · ${snap?.local?.agentName || "busy"}` : "This PC"}
         />
         <Dot
-          label="Spark 1"
           on={Boolean(snap?.spark1?.ok)}
           busy={spark1Busy}
           title={spark1Busy ? `Spark 1 · ${snap?.spark1?.agentName || "busy"}` : "Spark 1"}
         />
-        <Dot label="Spark 2" on={Boolean(snap?.spark2?.ok)} busy={spark2Busy} title={spark2Title} />
+        <Dot on={Boolean(snap?.spark2?.ok)} busy={spark2Busy} title={spark2Title} />
         <Dot
-          label="Cloud"
           on={Boolean(snap?.cloud?.ok)}
           busy={cloudBusy}
           title={cloudBusy ? `Cloud · ${snap?.cloud?.inFlight || 1} job` : "Cloud"}

@@ -165,7 +165,9 @@ export function ForgeForm() {
                 placeholder="What this bay is for"
               />
             </label>
-            <p className="text-sm text-[var(--ink-soft)]">Pick one or two strengths</p>
+            <p className="text-sm text-[var(--ink-soft)]">
+              Pick one or two strengths. The first one you pick is the job this desk will actually do.
+            </p>
             <div className="grid gap-3 sm:grid-cols-2">
               {STRENGTHS.map((o) => (
                 <button
