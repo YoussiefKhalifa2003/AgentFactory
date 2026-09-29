@@ -57,6 +57,18 @@ _OPS = re.compile(
     r"\b(follow[\s-]?up|process|checklist|standup|coordinate|schedule|ops|owner)\b",
     re.I,
 )
+_REVIEW = re.compile(
+    r"\b((?:code\s+)?review|audit|inspect|pull request|\bPRs?\b|findings)\b",
+    re.I,
+)
+_BRIEF = re.compile(
+    r"\b(brief(?:ing)?s?|status update|exec(?:utive)? (?:summary|brief)|so-what)\b",
+    re.I,
+)
+_QA = re.compile(
+    r"\b(unit tests?|test coverage|pytest|write tests|\bqa\b)\b",
+    re.I,
+)
 
 
 def default_db_path() -> Path:
@@ -276,8 +288,14 @@ def _suggest_strength(text: str) -> str:
         return "maths"
     if _DATA.search(text):
         return "data"
+    if _QA.search(text):
+        return "qa"
+    if _REVIEW.search(text):
+        return "review"
     if _CODING.search(text):
         return "coding"
+    if _BRIEF.search(text):
+        return "brief"
     if _WRITING.search(text):
         return "writing"
     if _RESEARCH.search(text):

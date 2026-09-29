@@ -17,6 +17,9 @@ CATALOG: list[dict[str, str]] = [
     {"id": "data", "label": "Data", "copy": "Tables, metrics, dashboards"},
     {"id": "planning", "label": "Planning", "copy": "Plans, roadmaps, breakdowns"},
     {"id": "ops", "label": "Ops", "copy": "Follow-ups, process, coordination"},
+    {"id": "review", "label": "Review", "copy": "Findings, severity, what to fix"},
+    {"id": "brief", "label": "Brief", "copy": "Situation, so-what, one ask"},
+    {"id": "qa", "label": "QA", "copy": "Writes tests and runs them"},
 ]
 
 MAX_STRENGTHS = 2
