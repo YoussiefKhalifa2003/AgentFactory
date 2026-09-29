@@ -39,12 +39,15 @@ function settledStatus(status?: string) {
   return ["done", "blocked", "cancelled"].includes(status || "");
 }
 
+export type StageMode = "office" | "desk" | null;
+
 type FactoryContextValue = {
   agents: Agent[];
   jobs: Job[];
   live: Record<string, LiveState>;
   selectedId: string | null;
   stageOpen: boolean;
+  stageMode: StageMode;
   connected: boolean;
   booted: boolean;
   offline: boolean;
@@ -58,6 +61,8 @@ type FactoryContextValue = {
   setOpenListId: (id: string) => void;
   select: (id: string | null) => void;
   openStage: (id: string) => void;
+  openOffice: () => void;
+  openDesk: (id?: string) => void;
   closeStage: () => void;
   toggleStage: (id?: string) => void;
   openPreview: (jobId: string, file: Artifact) => void;
@@ -82,7 +87,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [live, setLive] = useState<Record<string, LiveState>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [stageOpen, setStageOpen] = useState(false);
+  const [stageMode, setStageMode] = useState<StageMode>(null);
+  const stageOpen = stageMode !== null;
   const [connected, setConnected] = useState(false);
   const [booted, setBooted] = useState(false);
   const [offline, setOffline] = useState(false);
@@ -326,7 +332,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
           });
           setSelectedId((cur) => {
             if (cur === gone) {
-              setStageOpen(false);
+              setStageMode(null);
               return null;
             }
             return cur;
@@ -369,6 +375,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
             )
           );
           if (status === "done") refreshShowroom().catch(() => undefined);
+          setTaskTick((n) => n + 1);
         }
         if (msg.type === "job.artifact" && msg.artifact && msg.jobId) {
           const art = msg.artifact as Artifact;
@@ -500,7 +507,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       return next;
     });
     setSelectedId((cur) => {
-      if (cur === agentId) setStageOpen(false);
+      if (cur === agentId) setStageMode(null);
       return cur === agentId ? null : cur;
     });
   }, []);
@@ -570,6 +577,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       live,
       selectedId,
       stageOpen,
+      stageMode,
       connected,
       booted,
       offline,
@@ -584,14 +592,21 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       select: setSelectedId,
       openStage: (id: string) => {
         setSelectedId(id);
-        setStageOpen(true);
+        setStageMode("desk");
       },
-      closeStage: () => setStageOpen(false),
+      openOffice: () => setStageMode("office"),
+      openDesk: (id?: string) => {
+        if (id) setSelectedId(id);
+        setStageMode("desk");
+      },
+      closeStage: () => setStageMode(null),
       toggleStage: (id?: string) => {
-        const target = id || selectedId;
-        if (!target) return;
-        setSelectedId(target);
-        setStageOpen((open) => (id && id !== selectedId ? true : !open));
+        if (id) {
+          setSelectedId(id);
+          setStageMode((mode) => (mode === "desk" && id === selectedId ? null : "desk"));
+          return;
+        }
+        setStageMode((mode) => (mode === "office" ? null : "office"));
       },
       openPreview: (jobId: string, file: Artifact) => setPreview({ jobId, file }),
       closePreview: () => setPreview(null),
@@ -609,6 +624,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       live,
       selectedId,
       stageOpen,
+      stageMode,
       connected,
       booted,
       offline,
