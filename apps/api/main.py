@@ -12,7 +12,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -26,12 +26,20 @@ import sandbox
 import strengths as skillset
 import zen
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+FOUNDRY_TOKEN = (os.getenv("FOUNDRY_TOKEN") or "").strip()
 
 app = FastAPI(title="Foundry", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
+    allow_origin_regex=r"https://.*\.ts\.net(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,6 +47,23 @@ app.add_middleware(
 
 db.PFPS.mkdir(parents=True, exist_ok=True)
 app.mount("/pfps", StaticFiles(directory=db.PFPS), name="pfps")
+
+
+def _request_token(request: Request) -> str:
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.query_params.get("token") or "").strip()
+
+
+@app.middleware("http")
+async def foundry_token(request: Request, call_next):
+    if not FOUNDRY_TOKEN or request.method == "OPTIONS":
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        if _request_token(request) != FOUNDRY_TOKEN:
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 class Hub:
@@ -190,9 +215,12 @@ async def startup() -> None:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health(ping: int = 0) -> dict[str, Any]:
+    if ping:
+        return {"ok": True}
     import catalog
     import plant
+    import repos
 
     local = await catalog.refresh_local()
     spark = await catalog.refresh_spark()
@@ -206,6 +234,7 @@ async def health() -> dict[str, Any]:
         "routers": llm.configured(),
         "meetings": meetings.status(),
         "plant": plant.snapshot(),
+        "code_read": repos.has_pat(),
     }
 
 
@@ -254,7 +283,10 @@ async def projects() -> list[dict[str, Any]]:
 async def add_project(body: ProjectIn) -> dict[str, Any]:
     if not all(part.strip() for part in (body.name, body.organization, body.project, body.repository)):
         raise HTTPException(400, "name, organization, project, and repository are required")
-    return db.create_project(body.model_dump())
+    import repos
+
+    row = db.create_project(body.model_dump())
+    return repos.sync(row["id"])
 
 
 @app.delete("/api/projects/{project_id}")
@@ -328,7 +360,10 @@ async def create_list(body: ListIn) -> dict[str, Any]:
     title = body.title.strip()
     if not title:
         raise HTTPException(400, "title required")
-    return db.create_list({"title": title, "kind": "custom"})
+    try:
+        return db.create_list({"title": title, "kind": "custom"})
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
 
 
 @app.get("/api/lists/{list_id}")
@@ -637,6 +672,14 @@ async def latest_shift() -> dict[str, Any]:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    if FOUNDRY_TOKEN:
+        header = ws.headers.get("authorization") or ""
+        sent = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if not sent:
+            sent = (ws.query_params.get("token") or "").strip()
+        if sent != FOUNDRY_TOKEN:
+            await ws.close(code=1008)
+            return
     await hub.connect(ws)
     try:
         await ws.send_text(
@@ -685,3 +728,22 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     await hub.send({"type": "task.updated", "item": result["item"]})
     except WebSocketDisconnect:
         hub.disconnect(ws)
+
+
+PHONE_OUT = Path(__file__).resolve().parents[2] / "AI_HarnessPhone" / "out"
+
+
+@app.get("/")
+async def phone_home() -> FileResponse:
+    index = PHONE_OUT / "index.html"
+    if not index.is_file():
+        raise HTTPException(404, "phone app not built")
+    return FileResponse(
+        index,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+if PHONE_OUT.is_dir():
+    app.mount("/", StaticFiles(directory=PHONE_OUT, html=True), name="phone")
