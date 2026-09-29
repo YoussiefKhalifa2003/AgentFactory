@@ -11,7 +11,10 @@ export type Strength =
   | "writing"
   | "data"
   | "planning"
-  | "ops";
+  | "ops"
+  | "review"
+  | "brief"
+  | "qa";
 
 export type SkillPack = { id: string; label: string; copy: string };
 
@@ -23,12 +26,16 @@ export const STRENGTHS: SkillPack[] = [
   { id: "data", label: "Data", copy: "Tables, metrics, dashboards" },
   { id: "planning", label: "Planning", copy: "Plans, roadmaps, breakdowns" },
   { id: "ops", label: "Ops", copy: "Follow-ups, process, coordination" },
+  { id: "review", label: "Review", copy: "Findings, severity, what to fix" },
+  { id: "brief", label: "Brief", copy: "Situation, so-what, one ask" },
+  { id: "qa", label: "QA", copy: "Writes tests and runs them" },
 ];
 
 export const TOOLS: SkillPack[] = [
   { id: "drawio", label: "draw.io", copy: "Flowcharts and maps that open in draw.io" },
   { id: "spreadsheet", label: "Spreadsheet", copy: "A real sheet you can open as a table" },
   { id: "pdf", label: "PDF", copy: "One printable pack — the file you send" },
+  { id: "slides", label: "Slides", copy: "A deck you can open with View" },
 ];
 
 export type Activity =
@@ -231,7 +238,7 @@ export type TaskStatus = "open" | "assigned" | "working" | "done" | "blocked";
 export type TaskList = {
   id: string;
   title: string;
-  kind: "inbox" | "custom" | "meeting" | string;
+  kind: "inbox" | "custom" | "meeting" | "done" | string;
   source?: string | null;
   project_id?: string | null;
   project?: {
@@ -261,6 +268,9 @@ export type ListItem = {
   job_id: string | null;
   source?: string | null;
   mine: boolean;
+  recap?: string | null;
+  artifact?: Artifact | null;
+  virtual?: boolean;
 };
 
 export function pfpSrc(pfp: string | null | undefined): string | null {
