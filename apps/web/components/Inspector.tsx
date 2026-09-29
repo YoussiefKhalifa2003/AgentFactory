@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useFactory } from "@/lib/factory";
 import { API_URL, Artifact, Job, ListItem, STRENGTHS, badgeDataUrl, pfpSrc } from "@/lib/types";
 import { splitPacks, useSkillCatalog } from "@/lib/skills";
@@ -137,7 +138,13 @@ function isPdfFile(a: Artifact) {
   return a.kind === "pack" || /\.pdf$/i.test(a.name);
 }
 
+function writableListId(id: string | null | undefined) {
+  if (!id || id === "done") return "inbox";
+  return id;
+}
+
 function fileKindLabel(file: Artifact) {
+  if (/slides\.html$/i.test(file.name)) return "Deck";
   if (isHtmlFile(file)) return "Page";
   if (isMermaidFile(file)) return "Chart";
   if (isDrawioFile(file)) return "draw.io";
@@ -315,7 +322,7 @@ function DrawioEmbed({ xml }: { xml: string }) {
       ref={frame}
       title="draw.io"
       src={src}
-      className="h-[70vh] w-full border-0"
+      className="h-full w-full border-0"
     />
   );
 }
@@ -333,7 +340,7 @@ function downloadSrc(file: Artifact) {
   return `${API_URL}/api/artifacts/${file.id}/file?download=1`;
 }
 
-function FilePreview({
+export function FilePreview({
   jobId,
   file,
   onClose,
@@ -388,33 +395,28 @@ function FilePreview({
     };
   }, [onClose]);
 
-  const wide = drawio || mermaid || sheet || pdf || html;
+  const [ready, setReady] = useState(false);
+  useEffect(() => setReady(true), []);
+  if (!ready) return null;
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-[rgba(28,24,20,0.45)] p-3 sm:p-5"
+      className="fixed inset-0 z-[400] flex items-center justify-center bg-[rgba(28,24,20,0.32)] p-4 sm:p-8"
       onClick={onClose}
     >
       <div
-        className={`flex max-h-[96vh] w-full flex-col overflow-hidden rounded-[28px] bg-[var(--paper)] shadow-xl ${
-          wide ? "max-w-[96vw]" : "max-w-4xl"
-        }`}
+        className="flex h-[min(92vh,1080px)] w-[min(94vw,1400px)] flex-col overflow-hidden rounded-[28px] bg-[#fffdf8] shadow-[0_40px_80px_-32px_rgba(28,24,20,0.45)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex shrink-0 items-center justify-between gap-3 px-5 py-3">
-          <div className="min-w-0">
-            <p className="text-[11px] tracking-[0.2em] uppercase text-[var(--ink-soft)]">
-              {fileKindLabel(file)}
-            </p>
-            <p className="truncate text-sm font-medium">{file.name}</p>
-          </div>
-          <div className="flex shrink-0 gap-2">
+          <p className="min-w-0 truncate text-sm">{file.name}</p>
+          <div className="flex shrink-0 items-center gap-3">
             {html && (
-              <a className="btn" href={pageUrl} target="_blank" rel="noreferrer">
-                Open full page
+              <a className="text-[12px] text-[var(--ink-soft)]" href={pageUrl} target="_blank" rel="noreferrer">
+                Open page
               </a>
             )}
-            <a className="btn" href={downloadSrc(file)}>
+            <a className="text-[12px] text-[var(--ink-soft)]" href={downloadSrc(file)}>
               Download
             </a>
             <button type="button" className="btn" onClick={onClose}>
@@ -423,7 +425,7 @@ function FilePreview({
           </div>
         </div>
         <div
-          className="relative min-h-0 flex-1 bg-black"
+          className="relative min-h-0 flex-1 bg-white"
           onMouseDown={(e) => {
             e.stopPropagation();
             frameRef.current?.focus();
@@ -434,7 +436,7 @@ function FilePreview({
               ref={frameRef}
               title={file.name}
               src={src}
-              className="block h-[min(82vh,920px)] min-h-[480px] w-full border-0 bg-black"
+              className="block h-full w-full border-0 bg-white"
               style={{ pointerEvents: "auto" }}
               allow="fullscreen; gamepad; pointer-lock; autoplay; clipboard-write"
               allowFullScreen
@@ -442,31 +444,26 @@ function FilePreview({
               onLoad={() => frameRef.current?.focus()}
             />
           ) : image ? (
-            <img
-              src={src}
-              alt={file.name}
-              className="mx-auto max-h-[70vh] object-contain p-4"
-            />
+            <img src={src} alt={file.name} className="mx-auto h-full w-full object-contain p-6" />
           ) : pdf ? (
-            <iframe
-              title={file.name}
-              src={src}
-              className="h-[70vh] w-full border-0"
-            />
+            <iframe title={file.name} src={src} className="h-full w-full border-0 bg-white" />
           ) : mermaid && text && !text.startsWith("Couldn't") ? (
-            <MermaidChart source={text} />
+            <div className="h-full overflow-auto">
+              <MermaidChart source={text} />
+            </div>
           ) : sheet && text && !text.startsWith("Couldn't") ? (
-            <SheetTable source={text} />
+            <div className="h-full overflow-auto">
+              <SheetTable source={text} />
+            </div>
           ) : drawio && text && text.trim().startsWith("<") ? (
             <DrawioEmbed xml={text} />
           ) : (
-            <pre className="max-h-[70vh] overflow-auto bg-white p-4 text-sm whitespace-pre-wrap">
-              {text ?? "Loading…"}
-            </pre>
+            <pre className="h-full overflow-auto bg-white p-6 text-sm whitespace-pre-wrap">{text ?? "Loading…"}</pre>
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -477,18 +474,17 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     selectedId,
     live,
     openListId,
-    stageOpen,
     assignWork,
-    toggleStage,
     deleteAgent,
     closeStage,
+    openDesk,
+    stageMode,
     updateAgent,
     setAgents,
     taskTick,
     chains,
-    preview: pinPreview,
     openPreview,
-    closePreview,
+    setOpenListId,
   } = useFactory();
   const agent = agents.find((a) => a.id === selectedId) || agents[0];
   const { tools } = useSkillCatalog();
@@ -496,7 +492,6 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   const [prompt, setPrompt] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [tray, setTray] = useState<ListItem[]>([]);
-  const [showEarlier, setShowEarlier] = useState(false);
   const [handError, setHandError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -525,21 +520,22 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   const thread = useMemo(() => {
     if (!agent) return [] as Job[];
     const recent = jobs.filter((j) => j.agent_id === agent.id && !isNoise(j));
-    const visible = showEarlier ? recent.slice().reverse() : recent.slice(0, 8).reverse();
-    const current = state?.job;
+    const liveJob = state?.job;
+    const liveWorking = Boolean(
+      liveJob && ["queued", "thinking", "tool"].includes(liveJob.status)
+    );
+    const lastSettled = recent.find((j) => ["done", "blocked", "cancelled"].includes(j.status));
     const out: Job[] = [];
-    for (const job of visible) {
-      const prev = out[out.length - 1];
-      if (prev && prev.prompt === job.prompt && (prev.output || "") === (job.output || "")) {
-        continue;
-      }
-      out.push(job);
-    }
-    if (current && current.prompt && !out.some((j) => j.id === current.id)) {
-      out.push(current);
+    if (liveWorking && liveJob) {
+      if (lastSettled && lastSettled.id !== liveJob.id) out.push(lastSettled);
+      out.push(liveJob);
+    } else if (lastSettled) {
+      out.push(lastSettled);
+    } else if (liveJob?.prompt) {
+      out.push(liveJob);
     }
     return out;
-  }, [agent, jobs, state?.job, showEarlier]);
+  }, [agent, jobs, state?.job]);
 
   useEffect(() => {
     const el = scroller.current;
@@ -560,7 +556,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     if (!prompt.trim()) return;
     const text = prompt.trim();
     setHandError(null);
-    assignWork({ agentId: agent.id, text, listId: openListId || "inbox" })
+    assignWork({ agentId: agent.id, text, listId: writableListId(openListId) })
       .then(() => setPrompt(""))
       .catch((err) => setHandError(err instanceof Error ? err.message : "Could not assign"));
   }
@@ -599,16 +595,20 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   const waiting = tray.filter((item) => item.status === "assigned");
 
   return (
-    <aside className="glass flex h-full min-h-0 flex-col rounded-[28px] p-5">
+    <aside className="glass flex h-full min-h-0 flex-col rounded-[28px] p-4">
       <div className="flex shrink-0 items-center gap-3">
         <img src={portrait} alt="" className="h-12 w-12 rounded-2xl object-cover" />
-        <div className="min-w-0">
-          <p className="text-[11px] tracking-[0.22em] uppercase text-[var(--ink-soft)]">Desk</p>
-          <h2 className="text-xl font-semibold">{agent.name}</h2>
-          {agent.description && (
+        <div className="min-w-0 flex-1">
+          <h2 className="display truncate text-[1.45rem] leading-tight">{agent.name}</h2>
+          {!compact && agent.description && (
             <p className="truncate text-sm text-[var(--ink-soft)]">{agent.description}</p>
           )}
         </div>
+        {stageMode !== "desk" && (
+          <button type="button" className="btn shrink-0" onClick={() => openDesk(agent.id)}>
+            3D desk
+          </button>
+        )}
       </div>
       {!compact && (
         <>
@@ -630,6 +630,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
               );
             })}
           </div>
+          <p className="mt-1 text-[11px] text-[var(--ink-soft)]">
+            First skill on is the job. Second is extra.
+          </p>
           {tools.length > 0 && (
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <span className="text-[11px] tracking-[0.18em] uppercase text-[var(--ink-soft)]">
@@ -655,59 +658,59 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
           )}
         </>
       )}
-      <div className="mt-3 shrink-0">
-        <ModelPicker
-          compact
-          value={agent.model}
-          onChange={(id) => {
-            if (id === agent.model) return;
-            updateAgent(agent.id, { model: id }).catch(() => undefined);
-          }}
-        />
-      </div>
+      {!compact && (
+        <div className="mt-3 shrink-0">
+          <ModelPicker
+            compact
+            value={agent.model}
+            onChange={(id) => {
+              if (id === agent.model) return;
+              updateAgent(agent.id, { model: id }).catch(() => undefined);
+            }}
+          />
+        </div>
+      )}
+      {(working || !compact) && (
       <div className="mt-3 flex shrink-0 gap-2">
-        <button
-          type="button"
-          onClick={() => toggleStage(agent.id)}
-          className="btn btn-pigment"
-          style={{ background: agent.pigment }}
-        >
-          {stageOpen ? "Hide live floor" : "Live floor"}
-        </button>
-        <button
-          type="button"
-          disabled={deleting}
-          onClick={async () => {
-            if (!confirm(`Remove ${agent.name}? This desk and its files go with them.`)) return;
-            setDeleting(true);
-            try {
-              await deleteAgent(agent.id);
-              closeStage();
-            } finally {
-              setDeleting(false);
-            }
-          }}
-          className="btn"
-        >
-          {deleting ? "Removing…" : "Remove"}
-        </button>
         {working && (
           <button type="button" className="btn" disabled={stopping} onClick={stopJob}>
             {stopping ? "Stopping…" : "Stop"}
           </button>
         )}
-        <button
-          type="button"
-          className="btn"
-          onClick={() => {
-            setDraftName(agent.name);
-            setDraftAbout(agent.description || "");
-            setEditing((open) => !open);
-          }}
-        >
-          Edit
-        </button>
+        {!compact && (
+          <>
+            <button
+              type="button"
+              disabled={deleting}
+              onClick={async () => {
+                if (!confirm(`Remove ${agent.name}? This desk and its files go with them.`)) return;
+                setDeleting(true);
+                try {
+                  await deleteAgent(agent.id);
+                  closeStage();
+                } finally {
+                  setDeleting(false);
+                }
+              }}
+              className="btn"
+            >
+              {deleting ? "Removing…" : "Remove"}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setDraftName(agent.name);
+                setDraftAbout(agent.description || "");
+                setEditing((open) => !open);
+              }}
+            >
+              Edit
+            </button>
+          </>
+        )}
       </div>
+      )}
       {editing && (
         <form
           className="mt-3 flex shrink-0 flex-col gap-2"
@@ -782,11 +785,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         }}
         className="mt-4 min-h-0 flex-1 space-y-3 overflow-auto rounded-2xl bg-white/40 p-3"
       >
-        {jobs.filter((j) => j.agent_id === agent.id && !isNoise(j)).length > 8 && !showEarlier && (
-          <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setShowEarlier(true)}>
-            Earlier on this desk
-          </button>
-        )}
+        <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setOpenListId("done")}>
+          Done
+        </button>
         {thread.length === 0 && (
           <p className="text-sm text-[var(--ink-soft)]">
             Nothing on this desk yet. Assign a to-do from the left.
@@ -894,7 +895,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                     assignWork({
                       agentId: agent.id,
                       text: item.prompt,
-                      listId: openListId || "inbox",
+                      listId: writableListId(openListId),
                     }).catch((err) =>
                       setHandError(err instanceof Error ? err.message : "Could not assign")
                     );
@@ -907,18 +908,6 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
           );
         })}
       </div>
-
-      {pinPreview && (
-        <FilePreview
-          jobId={pinPreview.jobId}
-          file={
-            (state?.artifacts || []).find(
-              (a) => a.id === pinPreview.file.id || a.name === pinPreview.file.name
-            ) || pinPreview.file
-          }
-          onClose={closePreview}
-        />
-      )}
 
       <form onSubmit={onHand} className="mt-4 flex shrink-0 gap-2">
         <input
