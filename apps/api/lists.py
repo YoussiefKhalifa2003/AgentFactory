@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import db
 import meetings
+
+DONE_ID = "done"
+DONE_LIMIT = 80
+_NOISE = re.compile(
+    r"server restarted|interrupted|freetiererror|creditserror|payment method|"
+    r"opencode\.ai/workspace|only be used from within opencode",
+    re.I,
+)
+_FENCE = re.compile(r"```[\s\S]*?```")
+_TASK_LINE = re.compile(r"^(?:Action|Task):\s*(.+)$", re.M)
 
 
 def pick_best_agent(suggested: str) -> dict[str, Any] | None:
@@ -91,15 +102,152 @@ def sync_meetings() -> None:
             )
 
 
+def _job_is_noise(job: dict[str, Any]) -> bool:
+    output = str(job.get("output") or "").strip()
+    if output:
+        return False
+    blob = f"{job.get('caption') or ''} {job.get('error') or ''} {job.get('output') or ''}"
+    return bool(_NOISE.search(blob))
+
+
+def _task_title(prompt: str, text: str = "") -> str:
+    if (text or "").strip():
+        return text.strip()
+    src = prompt or ""
+    match = _TASK_LINE.search(src)
+    if match:
+        return match.group(1).strip()
+    line = (src.split("\n", 1)[0] if src else "Task").strip()
+    return line or "Task"
+
+
+def _is_view_placeholder(text: str) -> bool:
+    blob = re.sub(r"\s+", " ", (text or "").strip().lower())
+    return blob.endswith("use view.") or blob.endswith("use view")
+
+
+def _recap(output: str) -> str:
+    raw = _FENCE.sub("", output or "").strip()
+    if not raw or _is_view_placeholder(raw):
+        return ""
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    clip = " ".join(lines[:3])
+    if len(clip) > 220:
+        return clip[:217].rstrip() + "…"
+    return clip
+
+
+def _best_artifact(arts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not arts:
+        return None
+
+    def rank(row: dict[str, Any]) -> int:
+        name = str(row.get("name") or "").lower()
+        kind = str(row.get("kind") or "")
+        if kind == "site" or name.endswith((".html", ".htm")):
+            return 0
+        if name.endswith(".mmd"):
+            return 1
+        if name.endswith("review.md"):
+            return 6
+        if kind == "sheet" or name.endswith(".csv"):
+            return 2
+        if kind == "pack" or name.endswith(".pdf"):
+            return 3
+        if name.endswith(".drawio"):
+            return 4
+        if kind == "plot" or name.endswith((".png", ".jpg", ".jpeg", ".svg", ".webp")):
+            return 5
+        return 9
+
+    viewable = [row for row in arts if rank(row) < 9]
+    if not viewable:
+        return None
+    viewable.sort(key=rank)
+    return viewable[0]
+
+
+def _done_jobs() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for job in db.list_jobs():
+        if job.get("status") != "done":
+            continue
+        if _job_is_noise(job):
+            continue
+        out.append(job)
+        if len(out) >= DONE_LIMIT:
+            break
+    return out
+
+
+def _job_as_item(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": f"{DONE_ID}-{job['id']}",
+        "list_id": DONE_ID,
+        "text": _task_title(str(job.get("prompt") or "")),
+        "prompt": job.get("prompt") or "",
+        "suggested": "ops",
+        "status": "done",
+        "agent_id": job.get("agent_id"),
+        "job_id": job["id"],
+        "source": None,
+        "mine": True,
+        "virtual": True,
+        "recap": _recap(str(job.get("output") or "")),
+        "artifact": _best_artifact(job.get("artifacts") or []),
+    }
+
+
+def _done_items() -> list[dict[str, Any]]:
+    return [_job_as_item(job) for job in _done_jobs()]
+
+
+def _done_meta(count: int | None = None) -> dict[str, Any]:
+    n = len(_done_jobs()) if count is None else count
+    return {
+        "id": DONE_ID,
+        "title": "Done",
+        "kind": "done",
+        "source": None,
+        "project_id": None,
+        "project": None,
+        "sort_at": None,
+        "item_count": n,
+        "open_count": 0,
+        "working_count": 0,
+        "done_count": n,
+    }
+
+
+def _inject_done(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    done = _done_meta()
+    out: list[dict[str, Any]] = []
+    inserted = False
+    for row in rows:
+        out.append(row)
+        if row.get("id") == "inbox" or row.get("kind") == "inbox":
+            out.append(done)
+            inserted = True
+    if not inserted:
+        out.insert(0, done)
+    return out
+
+
 def snapshot() -> dict[str, Any]:
+    import repos
+
     sync_meetings()
     return {
-        "lists": db.list_lists(),
+        "lists": _inject_done(db.list_lists()),
         "meetings": meetings.status(),
+        "code_read": repos.has_pat(),
     }
 
 
 def get_list_payload(list_id: str) -> dict[str, Any] | None:
+    if list_id == DONE_ID:
+        items = _done_items()
+        return {**_done_meta(len(items)), "items": items}
     sync_meetings()
     row = db.get_list(list_id)
     if not row:
@@ -111,6 +259,8 @@ def get_list_payload(list_id: str) -> dict[str, Any] | None:
 
 
 def add_item(list_id: str, text: str) -> dict[str, Any]:
+    if list_id == DONE_ID:
+        raise ValueError("that list cannot take items")
     lst = db.get_list(list_id)
     if not lst:
         raise KeyError("list not found")
@@ -159,7 +309,11 @@ def assign(
     chain: list[dict[str, Any]] | None = None,
     foreman: bool = False,
 ) -> dict[str, Any]:
+    if list_id == DONE_ID or (item_id and str(item_id).startswith(f"{DONE_ID}-")):
+        raise ValueError("done items cannot be assigned")
     item = db.get_item(item_id) if item_id else None
+    if item is not None and (item.get("list_id") == DONE_ID or item.get("virtual")):
+        raise ValueError("done items cannot be assigned")
     if item is None and text:
         target_list = list_id or "inbox"
         if not db.get_list(target_list):
@@ -177,8 +331,13 @@ def assign(
 
     if chain:
         import chains as crew
+        import foreman as boss
 
-        return crew.start_from_assign(item, [dict(step) for step in chain], created_by="user")
+        parts = boss.split_task_list(item.get("text") or item.get("prompt") or "")
+        steps = [dict(step) for step in chain]
+        if len(parts) >= 2:
+            steps = boss.apply_list_to_chain(steps, parts)
+        return crew.start_from_assign(item, steps, created_by="user")
 
     if foreman:
         import chains as crew

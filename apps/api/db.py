@@ -756,6 +756,9 @@ def _list_counts(list_id: str) -> dict[str, int]:
 
 def create_list(payload: dict[str, Any]) -> dict[str, Any]:
     list_id = payload.get("id") or str(uuid.uuid4())
+    title = payload["title"].strip()
+    if str(list_id).lower() == "done" or title.lower() == "done":
+        raise ValueError("that list already exists")
     now = utcnow()
     with _lock:
         con = connect()
@@ -766,7 +769,7 @@ def create_list(payload: dict[str, Any]) -> dict[str, Any]:
             """,
             (
                 list_id,
-                payload["title"].strip(),
+                title,
                 payload.get("kind") or "custom",
                 payload.get("source"),
                 payload.get("sort_at") or now,
