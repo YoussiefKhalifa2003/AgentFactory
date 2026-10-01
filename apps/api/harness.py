@@ -21,6 +21,27 @@ import zen
 
 Broadcast = Callable[[dict[str, Any]], None]
 log = logging.getLogger("harness")
+
+
+def _trace(
+    job_id: str,
+    agent_id: str,
+    kind: str,
+    broadcast: Broadcast,
+    **payload: Any,
+) -> None:
+    db.add_event(job_id, kind, payload)
+    events = db.job_trace(job_id)
+    last = events[-1] if events else {"kind": kind, "payload": payload}
+    broadcast(
+        {
+            "type": "job.trace",
+            "jobId": job_id,
+            "agentId": agent_id,
+            "events": events,
+            "event": last,
+        }
+    )
 _TOOL_STRENGTHS = {"coding", "maths", "data", "review", "qa", "slides"}
 _REVIEW_HEAD = re.compile(r"(?im)^#{1,3}\s+(verdict|findings)\b")
 _SLIDE_MARK = re.compile(r"<section\b[^>]*class\s*=\s*[\"'][^\"']*slide", re.I)
@@ -834,7 +855,17 @@ async def _run_named_tool(
             "query": event_args.get("query"),
             "bytes": len(str(event_args.get("query") or event_args.get("path") or "")),
         }
-    db.add_event(job["id"], "tool", {"name": name, "args": event_args})
+    db.add_event(job["id"], "tool", {"name": name, "args": event_args, "label": name, "detail": caption})
+    events = db.job_trace(job["id"])
+    broadcast(
+        {
+            "type": "job.trace",
+            "jobId": job["id"],
+            "agentId": agent["id"],
+            "events": events,
+            "event": events[-1] if events else {"kind": "tool", "label": name},
+        }
+    )
     broadcast(
         {
             "type": "job.activity",
@@ -1427,6 +1458,7 @@ def _block_job(
         error=note,
         output=kept,
     )
+    _trace(job_id, agent["id"], "blocked", broadcast, label="Needs attention", detail=short)
     broadcast(
         _wire(
             {**job, "id": job_id, "agent_id": agent["id"]},
@@ -1529,6 +1561,15 @@ async def _finish(
         error=None,
         model=used_model,
     )
+    _trace(
+        job_id,
+        agent["id"],
+        "done",
+        broadcast,
+        label="Done",
+        model=used_model,
+        tokens=max(1, len(output or "") // 4),
+    )
     import memory
 
     done_job = db.get_job(job_id) or job
@@ -1580,6 +1621,15 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
     used_model = "local"
 
     db.update_job(job_id, status="thinking", activity="thinking", caption="Working")
+    _trace(
+        job_id,
+        agent["id"],
+        "started",
+        broadcast,
+        label="Started",
+        detail="Working",
+        model=agent.get("model"),
+    )
     broadcast(
         _wire(
             job,
