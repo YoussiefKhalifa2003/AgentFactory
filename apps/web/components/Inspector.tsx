@@ -3,11 +3,16 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useFactory } from "@/lib/factory";
-import { API_URL, Artifact, Job, ListItem, STRENGTHS, badgeDataUrl, pfpSrc } from "@/lib/types";
+import { API_URL, Artifact, Job, ListItem, STRENGTHS } from "@/lib/types";
 import { splitPacks, useSkillCatalog } from "@/lib/skills";
 import { taskTitle } from "@/lib/tasks";
 import { RichText } from "@/lib/rich-text";
 import { ModelPicker } from "./ModelPicker";
+import { portraitFor, randomLook } from "@/lib/look";
+import { Chip } from "./ui/Chip";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { WorkTrace } from "./WorkTrace";
+import { Modal } from "./ui/Modal";
 
 function isNoise(job: Job) {
   if (job.status === "queued" || job.status === "thinking" || job.status === "tool") return false;
@@ -480,11 +485,12 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     openDesk,
     stageMode,
     updateAgent,
-    setAgents,
     taskTick,
     chains,
     openPreview,
     setOpenListId,
+    traces,
+    setGalleryOpen,
   } = useFactory();
   const agent = agents.find((a) => a.id === selectedId) || agents[0];
   const { tools } = useSkillCatalog();
@@ -497,6 +503,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [draftAbout, setDraftAbout] = useState("");
+  const [tab, setTab] = useState<"work" | "files" | "record" | "setup">("work");
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [fetchedTrace, setFetchedTrace] = useState<import("@/lib/types").TraceEvent[]>([]);
   const stick = useRef(true);
   const scroller = useRef<HTMLDivElement>(null);
 
@@ -516,6 +525,24 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
       stop = true;
     };
   }, [agent?.id, taskTick, state?.job?.status]);
+
+  useEffect(() => {
+    const id = state?.job?.id;
+    if (!id) {
+      setFetchedTrace([]);
+      return;
+    }
+    let stop = false;
+    fetch(`${API_URL}/api/jobs/${id}/trace`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (!stop && Array.isArray(data.events)) setFetchedTrace(data.events);
+      })
+      .catch(() => undefined);
+    return () => {
+      stop = true;
+    };
+  }, [state?.job?.id, state?.job?.status]);
 
   const thread = useMemo(() => {
     if (!agent) return [] as Job[];
@@ -588,11 +615,19 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     updateAgent(agent.id, { strengths: next }).catch(() => undefined);
   }
 
-  const portrait = pfpSrc(agent.pfp) || badgeDataUrl(agent.name, agent.pigment);
+  const portrait = portraitFor(agent, API_URL);
   const job = state?.job;
   const liveJobId = job?.id;
   const working = Boolean(job) && ["queued", "thinking", "tool"].includes(job?.status || "");
   const waiting = tray.filter((item) => item.status === "assigned");
+  const history = jobs.filter((j) => j.agent_id === agent.id && !isNoise(j)).slice(0, 24);
+  const allFiles = history.flatMap((item) =>
+    filesForJob(item, item.id === liveJobId ? state?.artifacts || [] : [], liveJobId).map((file) => ({
+      job: item,
+      file,
+    }))
+  );
+  const trace = (job?.id && traces[job.id]) || state?.trace || fetchedTrace;
 
   return (
     <aside className="glass flex h-full min-h-0 flex-col rounded-[28px] p-4">
@@ -600,7 +635,7 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         <img src={portrait} alt="" className="h-12 w-12 rounded-2xl object-cover" />
         <div className="min-w-0 flex-1">
           <h2 className="display truncate text-[1.45rem] leading-tight">{agent.name}</h2>
-          {!compact && agent.description && (
+          {agent.description && (
             <p className="truncate text-sm text-[var(--ink-soft)]">{agent.description}</p>
           )}
         </div>
@@ -610,170 +645,35 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
           </button>
         )}
       </div>
-      {!compact && (
-        <>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {STRENGTHS.map((s) => {
-              const on = agent.strengths.includes(s.id);
-              return (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => toggleStrength(s.id)}
-                  className={`rounded-full px-2 py-1 text-xs ${on ? "" : "text-[var(--ink-soft)]"}`}
-                  style={{
-                    background: on ? `color-mix(in srgb, ${agent.pigment} 18%, white)` : "transparent",
-                  }}
-                >
-                  {s.label}
-                </button>
-              );
-            })}
-          </div>
-          <p className="mt-1 text-[11px] text-[var(--ink-soft)]">
-            First skill on is the job. Second is extra.
-          </p>
-          {tools.length > 0 && (
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <span className="text-[11px] tracking-[0.18em] uppercase text-[var(--ink-soft)]">
-                Tools
-              </span>
-              {tools.map((s) => {
-                const on = agent.strengths.includes(s.id);
-                return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => toggleTool(s.id)}
-                    className={`rounded-full px-2 py-1 text-xs ${on ? "" : "text-[var(--ink-soft)]"}`}
-                    style={{
-                      background: on ? `color-mix(in srgb, ${agent.pigment} 18%, white)` : "transparent",
-                    }}
-                  >
-                    {s.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </>
-      )}
-      {!compact && (
-        <div className="mt-3 shrink-0">
-          <ModelPicker
+      <div className="mt-3 shrink-0">
+        <SegmentedControl
+          ariaLabel="Desk tabs"
+          value={tab}
+          onChange={setTab}
+          options={
             compact
-            value={agent.model}
-            onChange={(id) => {
-              if (id === agent.model) return;
-              updateAgent(agent.id, { model: id }).catch(() => undefined);
-            }}
-          />
-        </div>
-      )}
-      {(working || !compact) && (
-      <div className="mt-3 flex shrink-0 gap-2">
-        {working && (
+              ? [
+                  { id: "work", label: "Work" },
+                  { id: "setup", label: "Setup" },
+                ]
+              : [
+                  { id: "work", label: "Work" },
+                  { id: "files", label: "Files" },
+                  { id: "record", label: "Record" },
+                  { id: "setup", label: "Setup" },
+                ]
+          }
+        />
+      </div>
+      {working && (
+        <div className="mt-3 flex shrink-0 gap-2">
           <button type="button" className="btn" disabled={stopping} onClick={stopJob}>
             {stopping ? "Stopping…" : "Stop"}
           </button>
-        )}
-        {!compact && (
-          <>
-            <button
-              type="button"
-              disabled={deleting}
-              onClick={async () => {
-                if (!confirm(`Remove ${agent.name}? This desk and its files go with them.`)) return;
-                setDeleting(true);
-                try {
-                  await deleteAgent(agent.id);
-                  closeStage();
-                } finally {
-                  setDeleting(false);
-                }
-              }}
-              className="btn"
-            >
-              {deleting ? "Removing…" : "Remove"}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => {
-                setDraftName(agent.name);
-                setDraftAbout(agent.description || "");
-                setEditing((open) => !open);
-              }}
-            >
-              Edit
-            </button>
-          </>
-        )}
-      </div>
+        </div>
       )}
-      {editing && (
-        <form
-          className="mt-3 flex shrink-0 flex-col gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            updateAgent(agent.id, {
-              name: draftName.trim() || agent.name,
-              description: draftAbout,
-            }).then(() => setEditing(false));
-          }}
-        >
-          <input
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            className="rounded-full bg-white px-4 py-2 text-sm outline-none"
-          />
-          <input
-            value={draftAbout}
-            onChange={(e) => setDraftAbout(e.target.value)}
-            placeholder="What this desk is for"
-            className="rounded-full bg-white px-4 py-2 text-sm outline-none"
-          />
-          <label className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
-            Pigment
-            <input
-              type="color"
-              value={agent.pigment}
-              onChange={(e) => updateAgent(agent.id, { pigment: e.target.value })}
-            />
-          </label>
-          <label className="btn w-fit cursor-pointer text-xs">
-            Portrait
-            <input
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                const body = new FormData();
-                body.append("file", file);
-                const r = await fetch(`${API_URL}/api/agents/${agent.id}/pfp`, { method: "POST", body });
-                if (!r.ok) return;
-                const updated = (await r.json()) as typeof agent;
-                setAgents(agents.map((a) => (a.id === agent.id ? updated : a)));
-              }}
-            />
-          </label>
-          <button type="submit" className="btn btn-solid w-fit">
-            Save
-          </button>
-        </form>
-      )}
-
       {waiting.length > 0 && (
-        <ul className="mt-3 shrink-0 space-y-1 text-xs text-[var(--ink-soft)]">
-          {waiting.slice(0, 4).map((item) => (
-            <li key={item.id} className="truncate">
-              Waiting · {item.text}
-            </li>
-          ))}
-          {waiting.length > 4 && <li>{waiting.length - 4} more waiting</li>}
-        </ul>
+        <p className="mt-2 shrink-0 text-xs text-[var(--ink-soft)]">{waiting.length} waiting on this desk</p>
       )}
 
       <div
@@ -783,130 +683,235 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
           if (!el) return;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
         }}
-        className="mt-4 min-h-0 flex-1 space-y-3 overflow-auto rounded-2xl bg-white/40 p-3"
+        className="mt-3 min-h-0 flex-1 space-y-3 overflow-auto rounded-2xl bg-white/40 p-3"
       >
-        <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setOpenListId("done")}>
-          Done
-        </button>
-        {thread.length === 0 && (
-          <p className="text-sm text-[var(--ink-soft)]">
-            Nothing on this desk yet. Assign a to-do from the left.
-          </p>
-        )}
-        {thread.map((item) => {
-          const active = item.id === liveJobId && working;
-          const reply = jobReply(
-            item,
-            state?.tokens || "",
-            state?.think || "",
-            liveJobId,
-            active
-          );
-          const files = filesForJob(item, state?.artifacts || [], liveJobId);
-          const chartFile = files.find(isMermaidFile);
-          const drawioFile = files.find(isDrawioFile);
-          const sheetFile = files.find(isSheetFile);
-          const pdfFile = files.find(isPdfFile);
-          const imageFile = files.find(isImageFile);
-          const viewFile =
-            files.find(isHtmlFile) ||
-            chartFile ||
-            sheetFile ||
-            pdfFile ||
-            drawioFile ||
-            imageFile ||
-            files[0];
-          const extraViews = files.filter((file) => file.id !== viewFile?.id);
-          return (
-            <article key={item.id} className="space-y-2 rounded-2xl bg-white/70 px-3 py-3">
-              <p className="text-[11px] tracking-[0.16em] uppercase text-[var(--ink-soft)]">
-                {item.status === "blocked"
-                  ? "Needs attention"
-                  : item.status === "cancelled"
-                    ? "Stopped"
-                    : active
-                      ? "Working"
-                      : item.status === "done"
-                        ? "Done"
-                        : "On the desk"}
+        {tab === "work" && (
+          <>
+            {working && (
+              <WorkTrace
+                events={trace}
+                startedAt={job?.created_at || job?.updated_at}
+                tokens={Math.max(1, (state?.tokens || "").length / 4)}
+                model={agent.model}
+              />
+            )}
+            {thread.length === 0 && (
+              <p className="text-sm text-[var(--ink-soft)]">
+                Drop a to-do from the left, or type a task below.
               </p>
-              <p className="text-sm font-medium">{clip(taskTitle({ prompt: item.prompt }), 240)}</p>
-              {item.project_name && (
-                <p className="text-[11px] text-[var(--ink-soft)]">{item.project_name}</p>
-              )}
-              {item.chain_id && chains[item.chain_id] && (
-                <p className="text-[11px] text-[var(--ink-soft)]">
-                  {chains[item.chain_id].steps.find((s) => s.id === item.chain_step_id)?.seq || 1} of{" "}
-                  {chains[item.chain_id].steps.length}
-                </p>
-              )}
-              {(reply || active) && (
-                <div className="text-sm">
-                  {reply ? (
-                    <RichText text={reply} />
-                  ) : (
-                    <p className="text-sm">
-                      {/waiting for the local gpu/i.test(state?.job?.caption || "")
-                        ? "Waiting for the local GPU…"
-                        : `${agent.name} is working…`}
+            )}
+            {thread.map((item) => {
+              const active = item.id === liveJobId && working;
+              const reply = jobReply(item, state?.tokens || "", state?.think || "", liveJobId, active);
+              const files = filesForJob(item, state?.artifacts || [], liveJobId);
+              const viewFile = files.find(isHtmlFile) || files.find(isMermaidFile) || files.find(isSheetFile) || files.find(isPdfFile) || files.find(isDrawioFile) || files.find(isImageFile) || files[0];
+              const extraViews = files.filter((file) => file.id !== viewFile?.id);
+              const hero = item.status === "done" && viewFile;
+              return (
+                <article key={item.id} className={`space-y-2 rounded-2xl px-3 py-3 ${hero ? "bg-white shadow-sm" : "bg-white/70"}`}>
+                  <p className="text-[11px] tracking-[0.16em] uppercase text-[var(--ink-soft)]">
+                    {item.status === "blocked"
+                      ? "Needs attention"
+                      : item.status === "cancelled"
+                        ? "Stopped"
+                        : active
+                          ? "Working"
+                          : item.status === "done"
+                            ? "Result"
+                            : "On the desk"}
+                  </p>
+                  <p className="text-sm font-medium">{clip(taskTitle({ prompt: item.prompt }), 240)}</p>
+                  {item.project_name && <p className="text-[11px] text-[var(--ink-soft)]">{item.project_name}</p>}
+                  {item.chain_id && chains[item.chain_id] && (
+                    <p className="text-[11px] text-[var(--ink-soft)]">
+                      {chains[item.chain_id].steps.find((s) => s.id === item.chain_step_id)?.seq || 1} of{" "}
+                      {chains[item.chain_id].steps.length}
                     </p>
                   )}
-                  {active && (
-                    <span className="ml-1 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-[var(--ink)] align-middle" />
+                  {(reply || active) && (
+                    <div className="text-sm">
+                      {reply ? (
+                        <RichText text={reply} />
+                      ) : (
+                        <p className="text-sm">
+                          {/waiting for the local gpu/i.test(state?.job?.caption || "")
+                            ? "Waiting for the local GPU…"
+                            : `${agent.name} is working…`}
+                        </p>
+                      )}
+                      {active && (
+                        <span className="ml-1 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-[var(--ink)] align-middle" />
+                      )}
+                    </div>
                   )}
-                </div>
-              )}
-              {item.status === "blocked" && item.error && item.error !== reply && (
-                <p className="text-xs text-[var(--ink-soft)]">{item.error}</p>
-              )}
-              {files.length > 0 && (
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                  {viewFile && (
+                  {item.status === "blocked" && item.error && item.error !== reply && (
+                    <p className="text-xs text-[var(--ink-soft)]">{item.error}</p>
+                  )}
+                  {files.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      {viewFile && (
+                        <button
+                          type="button"
+                          className="btn btn-solid px-3 py-1 text-xs"
+                          onClick={() => openPreview(item.id, viewFile)}
+                        >
+                          View
+                        </button>
+                      )}
+                      {viewFile && (
+                        <a className="text-[11px] text-[var(--ink-soft)] underline" href={downloadSrc(viewFile)}>
+                          Download
+                        </a>
+                      )}
+                      {extraViews.map((a) => (
+                        <button
+                          key={a.id}
+                          type="button"
+                          className="text-[11px] text-[var(--ink-soft)] underline"
+                          onClick={() => openPreview(item.id, a)}
+                        >
+                          {fileKindLabel(a)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {item.status === "blocked" && (
                     <button
                       type="button"
-                      className="btn btn-solid px-3 py-1 text-xs"
-                      onClick={() => openPreview(item.id, viewFile)}
+                      className="btn px-3 py-1 text-xs"
+                      onClick={() => {
+                        assignWork({
+                          agentId: agent.id,
+                          text: item.prompt,
+                          listId: writableListId(openListId),
+                        }).catch((err) =>
+                          setHandError(err instanceof Error ? err.message : "Could not assign")
+                        );
+                      }}
                     >
-                      View
+                      Hand it again
                     </button>
                   )}
-                  {viewFile && (
-                    <a className="text-[11px] text-[var(--ink-soft)] underline" href={downloadSrc(viewFile)}>
-                      Download
-                    </a>
-                  )}
-                  {extraViews.map((a) => (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className="text-[11px] text-[var(--ink-soft)] underline"
-                      onClick={() => openPreview(item.id, a)}
-                    >
-                      {fileKindLabel(a)}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {item.status === "blocked" && (
-                <button
-                  type="button"
-                  className="btn px-3 py-1 text-xs"
-                  onClick={() => {
-                    assignWork({
-                      agentId: agent.id,
-                      text: item.prompt,
-                      listId: writableListId(openListId),
-                    }).catch((err) =>
-                      setHandError(err instanceof Error ? err.message : "Could not assign")
-                    );
-                  }}
-                >
-                  Hand it again
+                </article>
+              );
+            })}
+          </>
+        )}
+        {tab === "files" && (
+          <>
+            {allFiles.length === 0 && <p className="text-sm text-[var(--ink-soft)]">No files on this desk yet.</p>}
+            {allFiles.map(({ job: item, file }) => (
+              <div key={file.id} className="flex items-center justify-between gap-2 rounded-2xl bg-white/70 px-3 py-2">
+                <p className="min-w-0 truncate text-sm">{file.name}</p>
+                <button type="button" className="btn btn-compact" onClick={() => openPreview(item.id, file)}>
+                  {fileKindLabel(file)}
                 </button>
-              )}
-            </article>
-          );
-        })}
+              </div>
+            ))}
+          </>
+        )}
+        {tab === "record" && (
+          <>
+            <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setOpenListId("done")}>
+              Done list
+            </button>
+            <button type="button" className="btn px-3 py-1 text-xs" onClick={() => setGalleryOpen(true)}>
+              All results
+            </button>
+            {history.map((item) => (
+              <p key={item.id} className="truncate text-sm text-[var(--ink-soft)]">
+                {item.status} · {clip(taskTitle({ prompt: item.prompt }), 80)}
+              </p>
+            ))}
+          </>
+        )}
+        {tab === "setup" && (
+          <>
+            <p className="text-[11px] text-[var(--ink-soft)]">First skill on is the job. Second is extra.</p>
+            <div className="flex flex-wrap gap-2">
+              {STRENGTHS.map((s) => (
+                <Chip key={s.id} on={agent.strengths.includes(s.id)} pigment={agent.pigment} onClick={() => toggleStrength(s.id)}>
+                  {s.label}
+                </Chip>
+              ))}
+            </div>
+            {tools.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] tracking-[0.18em] uppercase text-[var(--ink-soft)]">Tools</span>
+                {tools.map((s) => (
+                  <Chip key={s.id} on={agent.strengths.includes(s.id)} pigment={agent.pigment} onClick={() => toggleTool(s.id)}>
+                    {s.label}
+                  </Chip>
+                ))}
+              </div>
+            )}
+            <ModelPicker
+              compact
+              value={agent.model}
+              onChange={(id) => {
+                if (id === agent.model) return;
+                updateAgent(agent.id, { model: id }).catch(() => undefined);
+              }}
+            />
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  const next = randomLook();
+                  updateAgent(agent.id, { look: next }).catch(() => undefined);
+                }}
+              >
+                New look
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setDraftName(agent.name);
+                  setDraftAbout(agent.description || "");
+                  setEditing((open) => !open);
+                }}
+              >
+                Edit
+              </button>
+              <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)}>
+                Remove
+              </button>
+            </div>
+            {editing && (
+              <form
+                className="flex flex-col gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  updateAgent(agent.id, {
+                    name: draftName.trim() || agent.name,
+                    description: draftAbout,
+                  }).then(() => setEditing(false));
+                }}
+              >
+                <input
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  className="rounded-full bg-white px-4 py-2 text-sm outline-none"
+                />
+                <input
+                  value={draftAbout}
+                  onChange={(e) => setDraftAbout(e.target.value)}
+                  placeholder="What this desk is for"
+                  className="rounded-full bg-white px-4 py-2 text-sm outline-none"
+                />
+                <label className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
+                  Pigment
+                  <input type="color" value={agent.pigment} onChange={(e) => updateAgent(agent.id, { pigment: e.target.value })} />
+                </label>
+                <button type="submit" className="btn btn-solid w-fit">
+                  Save
+                </button>
+              </form>
+            )}
+          </>
+        )}
       </div>
 
       <form onSubmit={onHand} className="mt-4 flex shrink-0 gap-2">
@@ -917,10 +922,35 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
           className="flex-1 rounded-full bg-white/70 px-4 py-2 text-sm outline-none"
         />
         <button type="submit" className="btn btn-solid" disabled={working}>
-          {working ? "Working" : "Assign"}
+          {working ? `${waiting.length ? waiting.length + 1 : ""} Working` : "Assign"}
         </button>
       </form>
-      {handError && <p className="mt-2 text-xs text-[#b42318]">{handError}</p>}
+      {handError && <p className="mt-2 text-xs text-[var(--alert)]">{handError}</p>}
+      <Modal open={confirmRemove} onClose={() => setConfirmRemove(false)} title={`Remove ${agent.name}?`}>
+        <p className="text-sm text-[var(--ink-soft)]">This desk and its files go with them.</p>
+        <div className="mt-4 flex gap-2">
+          <button type="button" className="btn" onClick={() => setConfirmRemove(false)}>
+            Keep
+          </button>
+          <button
+            type="button"
+            className="btn btn-solid"
+            disabled={deleting}
+            onClick={async () => {
+              setDeleting(true);
+              try {
+                await deleteAgent(agent.id);
+                closeStage();
+                setConfirmRemove(false);
+              } finally {
+                setDeleting(false);
+              }
+            }}
+          >
+            {deleting ? "Removing…" : "Remove"}
+          </button>
+        </div>
+      </Modal>
     </aside>
   );
 }
