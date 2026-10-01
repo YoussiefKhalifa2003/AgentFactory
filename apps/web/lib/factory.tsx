@@ -18,7 +18,9 @@ import {
   LiveState,
   PinCard,
   PlantSnapshot,
+  SceneQuality,
   ShiftNote,
+  TraceEvent,
   WS_URL,
 } from "./types";
 
@@ -58,6 +60,11 @@ type FactoryContextValue = {
   showroom: PinCard[];
   shift: ShiftNote | null;
   preview: { jobId: string; file: Artifact } | null;
+  traces: Record<string, TraceEvent[]>;
+  quality: SceneQuality;
+  paletteOpen: boolean;
+  insightsOpen: boolean;
+  galleryOpen: boolean;
   setOpenListId: (id: string) => void;
   select: (id: string | null) => void;
   openStage: (id: string) => void;
@@ -67,6 +74,10 @@ type FactoryContextValue = {
   toggleStage: (id?: string) => void;
   openPreview: (jobId: string, file: Artifact) => void;
   closePreview: () => void;
+  setQuality: (q: SceneQuality) => void;
+  setPaletteOpen: (open: boolean) => void;
+  setInsightsOpen: (open: boolean) => void;
+  setGalleryOpen: (open: boolean) => void;
   submitJob: (agentId: string, prompt: string) => void;
   assignWork: (args: AssignArgs) => Promise<{ queued?: boolean; agent?: Agent; job?: Job } | void>;
   deleteAgent: (agentId: string) => Promise<void>;
@@ -79,7 +90,7 @@ type FactoryContextValue = {
 const FactoryContext = createContext<FactoryContextValue | null>(null);
 
 function emptyLive(): LiveState {
-  return { job: null, tokens: "", think: "", artifacts: [] };
+  return { job: null, tokens: "", think: "", artifacts: [], trace: [] };
 }
 
 export function FactoryProvider({ children }: { children: React.ReactNode }) {
@@ -99,6 +110,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   const [showroom, setShowroom] = useState<PinCard[]>([]);
   const [shift, setShift] = useState<ShiftNote | null>(null);
   const [preview, setPreview] = useState<{ jobId: string; file: Artifact } | null>(null);
+  const [traces, setTraces] = useState<Record<string, TraceEvent[]>>({});
+  const [quality, setQuality] = useState<SceneQuality>("high");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const [galleryOpen, setGalleryOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const seenChains = useRef<Set<string>>(new Set());
 
@@ -145,6 +161,17 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       seenChains.current.delete(chainId);
     }
   }, []);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("foundry.quality") as SceneQuality | null;
+    if (saved === "high" || saved === "medium" || saved === "low" || saved === "off") {
+      setQuality(saved);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("foundry.quality", quality);
+  }, [quality]);
 
   useEffect(() => {
     refresh().catch(() => undefined);
@@ -376,6 +403,33 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
           );
           if (status === "done") refreshShowroom().catch(() => undefined);
           setTaskTick((n) => n + 1);
+          if (status === "done" || status === "blocked") {
+            const name = String(msg.agentName || msg.caption || "Desk");
+            const title = status === "done" ? "Job finished" : "Needs attention";
+            document.title = status === "done" ? "Done · Workspace" : "Attention · Workspace";
+            try {
+              import("sonner").then(({ toast }) => {
+                toast(title, { description: name });
+              });
+            } catch {
+              /* toast optional */
+            }
+            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+              new Notification(title, { body: String(msg.caption || name) });
+            }
+          }
+        }
+        if (msg.type === "job.trace" && msg.jobId) {
+          const jobId = String(msg.jobId);
+          const events = (Array.isArray(msg.events) ? msg.events : []) as TraceEvent[];
+          setTraces((prev) => ({ ...prev, [jobId]: events }));
+          if (msg.agentId) {
+            const agentId = String(msg.agentId);
+            setLive((prev) => {
+              const cur = prev[agentId] || emptyLive();
+              return { ...prev, [agentId]: { ...cur, trace: events } };
+            });
+          }
         }
         if (msg.type === "job.artifact" && msg.artifact && msg.jobId) {
           const art = msg.artifact as Artifact;
@@ -588,6 +642,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       showroom,
       shift,
       preview,
+      traces,
+      quality,
+      paletteOpen,
+      insightsOpen,
+      galleryOpen,
       setOpenListId,
       select: setSelectedId,
       openStage: (id: string) => {
@@ -610,6 +669,10 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       },
       openPreview: (jobId: string, file: Artifact) => setPreview({ jobId, file }),
       closePreview: () => setPreview(null),
+      setQuality,
+      setPaletteOpen,
+      setInsightsOpen,
+      setGalleryOpen,
       submitJob,
       assignWork,
       deleteAgent,
@@ -635,6 +698,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       showroom,
       shift,
       preview,
+      traces,
+      quality,
+      paletteOpen,
+      insightsOpen,
+      galleryOpen,
       submitJob,
       assignWork,
       deleteAgent,
