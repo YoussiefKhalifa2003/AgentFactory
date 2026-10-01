@@ -57,6 +57,19 @@ export type ModelOption = {
   vram?: string;
 };
 
+export type AgentLook = {
+  body: string;
+  head: string;
+  skin: string;
+  hair: string;
+  hairColor: string;
+  eyes: string;
+  brows: string;
+  mouth: string;
+  outfit: string;
+  accessory: string;
+};
+
 export type Agent = {
   id: string;
   name: string;
@@ -66,8 +79,24 @@ export type Agent = {
   strengths: string[];
   model: string;
   instructions: string;
+  look?: AgentLook | null;
   created_at?: string;
 };
+
+export type TraceEvent = {
+  id?: number;
+  kind: string;
+  at?: string;
+  duration_ms?: number;
+  label?: string;
+  detail?: string;
+  model?: string | null;
+  host?: string | null;
+  tokens?: number | null;
+  payload?: Record<string, unknown>;
+};
+
+export type SceneQuality = "high" | "medium" | "low" | "off";
 
 export type Artifact = {
   id: string;
@@ -208,6 +237,7 @@ export type LiveState = {
   tokens: string;
   think: string;
   artifacts: Artifact[];
+  trace?: TraceEvent[];
 };
 
 export type MeetingAction = {
