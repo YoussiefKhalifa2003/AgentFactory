@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import look as lookkit
 import strengths as skillset
 import zen
 
@@ -144,6 +145,7 @@ def init_db() -> list[str]:
         _ensure_column(con, "jobs", "project_id", "TEXT")
         _ensure_column(con, "jobs", "chain_id", "TEXT")
         _ensure_column(con, "jobs", "chain_step_id", "TEXT")
+        _ensure_column(con, "agents", "look", "TEXT")
         _ensure_column(con, "lists", "project_id", "TEXT")
         _ensure_column(con, "projects", "title", "TEXT")
         _ensure_column(con, "memories", "kind", "TEXT")
@@ -210,6 +212,11 @@ def init_db() -> list[str]:
         )
         con.execute("UPDATE projects SET title = name WHERE title IS NULL OR title = ''")
         con.execute("UPDATE memories SET kind = 'job' WHERE kind IS NULL OR kind = ''")
+        for row in con.execute("SELECT id, name, pigment, look FROM agents").fetchall():
+            if row["look"]:
+                continue
+            baked = lookkit.look_from_name(row["name"], row["pigment"])
+            con.execute("UPDATE agents SET look=? WHERE id=?", (json.dumps(baked), row["id"]))
         now = utcnow()
         for row in con.execute("SELECT id, repository, branch FROM projects").fetchall():
             exists = con.execute(
@@ -248,6 +255,14 @@ def _row(r: sqlite3.Row | None) -> dict[str, Any] | None:
             d["strengths"] = json.loads(d["strengths"])
         except json.JSONDecodeError:
             d["strengths"] = []
+    if "look" in d:
+        raw = d["look"]
+        if isinstance(raw, str) and raw.strip():
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = None
+        d["look"] = lookkit.parse_look(raw, d.get("name") or "agent", d.get("pigment"))
     return d
 
 
@@ -270,23 +285,26 @@ def create_agent(payload: dict[str, Any]) -> dict[str, Any]:
     now = utcnow()
     strengths = skillset.clamp(payload.get("strengths") or ["coding"])
     model = payload.get("model") or default_model_for(strengths)
+    pigment = payload.get("pigment") or pigment_from_name(payload["name"])
+    baked = lookkit.parse_look(payload.get("look"), payload["name"], pigment)
     with _lock:
         con = connect()
         con.execute(
             """
-            INSERT INTO agents (id, name, description, pigment, pfp, strengths, model, instructions, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO agents (id, name, description, pigment, pfp, strengths, model, instructions, created_at, look)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent_id,
                 payload["name"].strip(),
                 payload.get("description", "").strip(),
-                payload.get("pigment") or pigment_from_name(payload["name"]),
+                pigment,
                 payload.get("pfp"),
                 json.dumps(strengths),
                 model,
                 payload.get("instructions") or "",
                 now,
+                json.dumps(baked),
             ),
         )
         con.commit()
@@ -302,21 +320,25 @@ def update_agent(agent_id: str, payload: dict[str, Any]) -> dict[str, Any] | Non
         return None
     strengths = skillset.clamp(payload.get("strengths", current["strengths"]))
     model = payload["model"] if payload.get("model") else current["model"]
+    name = payload.get("name", current["name"])
+    pigment = payload.get("pigment", current["pigment"])
+    baked = lookkit.parse_look(payload.get("look", current.get("look")), name, pigment)
     with _lock:
         con = connect()
         con.execute(
             """
-            UPDATE agents SET name=?, description=?, pigment=?, pfp=?, strengths=?, model=?, instructions=?
+            UPDATE agents SET name=?, description=?, pigment=?, pfp=?, strengths=?, model=?, instructions=?, look=?
             WHERE id=?
             """,
             (
-                payload.get("name", current["name"]),
+                name,
                 payload.get("description", current["description"]),
-                payload.get("pigment", current["pigment"]),
+                pigment,
                 payload.get("pfp", current["pfp"]),
                 json.dumps(strengths),
                 model,
                 payload.get("instructions", current["instructions"]),
+                json.dumps(baked),
                 agent_id,
             ),
         )
@@ -484,6 +506,120 @@ def list_events(job_id: str) -> list[dict[str, Any]]:
             pass
         out.append(d)
     return out
+
+
+def job_trace(job_id: str) -> list[dict[str, Any]]:
+    rows = list_events(job_id)
+    prev: str | None = None
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        started = row.get("created_at")
+        duration_ms = 0
+        if prev and started:
+            try:
+                a = datetime.fromisoformat(str(prev).replace("Z", "+00:00"))
+                b = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                duration_ms = max(0, int((b - a).total_seconds() * 1000))
+            except ValueError:
+                duration_ms = 0
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        out.append(
+            {
+                "id": row.get("id"),
+                "kind": row.get("kind"),
+                "at": started,
+                "duration_ms": duration_ms,
+                "label": payload.get("label") or payload.get("name") or row.get("kind"),
+                "detail": payload.get("detail") or payload.get("caption") or "",
+                "model": payload.get("model"),
+                "host": payload.get("host"),
+                "tokens": payload.get("tokens"),
+                "payload": payload,
+            }
+        )
+        prev = started
+    return out
+
+
+def factory_stats() -> dict[str, Any]:
+    con = connect()
+    jobs = [dict(r) for r in con.execute("SELECT * FROM jobs").fetchall()]
+    agents = [dict(r) for r in con.execute("SELECT id, name, pigment FROM agents").fetchall()]
+    con.close()
+    by_agent: dict[str, dict[str, Any]] = {}
+    for agent in agents:
+        by_agent[agent["id"]] = {
+            "id": agent["id"],
+            "name": agent["name"],
+            "pigment": agent["pigment"],
+            "jobs": 0,
+            "done": 0,
+            "blocked": 0,
+            "tokens": 0,
+            "durations": [],
+        }
+    today = utcnow()[:10]
+    feed: list[dict[str, Any]] = []
+    for job in jobs:
+        slot = by_agent.setdefault(
+            job["agent_id"],
+            {
+                "id": job["agent_id"],
+                "name": job["agent_id"],
+                "pigment": "#1c1814",
+                "jobs": 0,
+                "done": 0,
+                "blocked": 0,
+                "tokens": 0,
+                "durations": [],
+            },
+        )
+        slot["jobs"] += 1
+        if job.get("status") == "done":
+            slot["done"] += 1
+        if job.get("status") == "blocked":
+            slot["blocked"] += 1
+        slot["tokens"] += max(1, len(str(job.get("output") or "")) // 4)
+        try:
+            a = datetime.fromisoformat(str(job.get("created_at") or "").replace("Z", "+00:00"))
+            b = datetime.fromisoformat(str(job.get("updated_at") or "").replace("Z", "+00:00"))
+            slot["durations"].append(max(0, (b - a).total_seconds()))
+        except ValueError:
+            pass
+        created = str(job.get("created_at") or "")
+        if created.startswith(today):
+            feed.append(
+                {
+                    "id": job["id"],
+                    "agent_id": job["agent_id"],
+                    "status": job.get("status"),
+                    "caption": job.get("caption") or job.get("prompt", "")[:80],
+                    "at": created,
+                }
+            )
+    desks = []
+    for slot in by_agent.values():
+        durs = sorted(slot.pop("durations"))
+        mid = durs[len(durs) // 2] if durs else 0
+        done = slot["done"]
+        total = slot["jobs"] or 1
+        desks.append(
+            {
+                **slot,
+                "median_s": round(mid, 1),
+                "success": round(done / total, 3),
+            }
+        )
+    feed.sort(key=lambda row: row.get("at") or "", reverse=True)
+    return {
+        "desks": desks,
+        "today": feed[:24],
+        "totals": {
+            "jobs": len(jobs),
+            "done": sum(1 for j in jobs if j.get("status") == "done"),
+            "blocked": sum(1 for j in jobs if j.get("status") == "blocked"),
+        },
+    }
 
 
 def add_artifact(
