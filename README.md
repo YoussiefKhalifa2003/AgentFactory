@@ -47,12 +47,12 @@ This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com
 | **Workspace** | Lists on the left, agent bays in the middle, the selected desk on the right |
 | **Forge** | Create an agent: look, one or two strengths, optional tool skills, a brain |
 | **Desk** | Assign work, read the finished answer, **View** / **Download** files |
-| **Office** | Optional 3D room of *every* desk — never opened by clicking a bay |
+| **Office** | Optional 3D room of *every* desk — never opened by clicking a bay. A live diorama sits on the Floor; click it to walk in.
 | **Jobs** | Stored work with status, tokens, artifacts — not a throwaway chat log |
 
-The header lists every busy name (`Ada and Euclid are working`). Four dots beside the connected light show This PC, Spark 1, Spark 2, and Cloud.
+The header lists every busy name (`Ada and Euclid are working`). Four labelled plant rows (This PC, Spark 1, Spark 2, Cloud) sit in the Plant chip. `Ctrl+K` opens the command palette. Insights and Results are in the header, not buried.
 
-A list can send work down a **crew** (Scout then Cade then Hamza) or **Let the floor split it**. Drop on a bay is still one desk. Finished View files land on a **showroom** under the bays — click a card to open that desk’s View. **Start night shift** on the power strip runs parked items up to eight, then the morning note lists finishes, blocks, and pins.
+A list can send work down a **crew** (Scout then Cade then Hamza) or **Let the floor split it**. Drop on a bay is still one desk. Finished View files land on a **showroom** under the bays and in **Results**. **Start night shift** in Plant runs parked items up to eight, then the morning note lists finishes, blocks, and pins.
 
 ---
 
@@ -87,7 +87,9 @@ Other files stay as extra View buttons and short Download labels (`Download shee
 
 ### Office
 
-A banner on the floor and an **Office** button in the header. One room, every agent, live screens, finished work on the showroom wall. Night shift dims the lights. A crew job flies a folder between desks. Click a person to open their desk. Clicking a bay never jumps you into 3D.
+A banner on the floor — a live miniature of the room — and an **Office** segment in the header. One room, every agent as a unique clay figure, live screens, skill-dressed desks, Spark racks and the 4090 as plant equipment, finished work on the showroom wall. Night shift dims the lights. A crew job flies a folder between desks. Click a person to open their desk. Clicking a bay never jumps you into 3D.
+
+The Desk inspector is tabbed: **Work** (live trace + result hero), **Files**, **Record**, **Setup**.
 
 ---
 
@@ -385,9 +387,11 @@ Frontend (optional, `apps/web/.env.local`):
 | `GET` | `/api/meetings` | Optional Meeting Note Taker feed |
 | `POST` | `/api/jobs` | Direct job |
 | `POST` | `/api/jobs/{id}/cancel` | Stop a running job |
+| `GET` | `/api/jobs/{id}/trace` | Tool timeline for the Work tab |
 | `GET` | `/api/jobs/{id}/site/{path}` | Inline website |
+| `GET` | `/api/stats` | Desk stats for Insights |
 | `GET` | `/api/artifacts/{id}/file` | Inline; `?download=1` to save |
-| `WS` | `/ws` | `job.token`, `job.activity`, `job.done`, `job.artifact`, `job.file`, `plant`, `chain.updated`, `shift.updated` |
+| `WS` | `/ws` | `job.token`, `job.activity`, `job.trace`, `job.done`, `job.artifact`, `job.file`, `plant`, `chain.updated`, `shift.updated` |
 
 Sandbox: timed Python, no network, path confined to that job’s folder.
 
@@ -449,8 +453,9 @@ AgentFactory/
 | Layer | Choice |
 | --- | --- |
 | UI | Next.js 15.5, React 19, Tailwind v4, Newsreader + Geist |
-| 3D | React Three Fiber, drei, three |
+| 3D | React Three Fiber, drei, three, postprocessing |
 | Charts | mermaid |
+| Motion | motion, cmdk, sonner |
 | API | FastAPI, SQLite, WebSocket |
 | PDF | fpdf2 |
 | Local models | Ollama (this machine) |
