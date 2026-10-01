@@ -114,6 +114,7 @@ class AgentIn(BaseModel):
     strengths: list[str] = Field(default_factory=lambda: ["coding"])
     instructions: str = ""
     model: str | None = None
+    look: dict[str, Any] | None = None
 
 
 class AgentPatch(BaseModel):
@@ -124,6 +125,7 @@ class AgentPatch(BaseModel):
     strengths: list[str] | None = None
     instructions: str | None = None
     model: str | None = None
+    look: dict[str, Any] | None = None
 
 
 class JobIn(BaseModel):
@@ -495,8 +497,21 @@ async def job(job_id: str) -> dict[str, Any]:
     if not row:
         raise HTTPException(404, "job not found")
     row["events"] = db.list_events(job_id)
+    row["trace"] = db.job_trace(job_id)
     row["artifacts"] = db.list_artifacts(job_id)
     return row
+
+
+@app.get("/api/jobs/{job_id}/trace")
+async def job_trace(job_id: str) -> dict[str, Any]:
+    if not db.get_job(job_id):
+        raise HTTPException(404, "job not found")
+    return {"job_id": job_id, "events": db.job_trace(job_id)}
+
+
+@app.get("/api/stats")
+async def stats() -> dict[str, Any]:
+    return db.factory_stats()
 
 
 @app.get("/api/jobs/{job_id}/artifacts")
