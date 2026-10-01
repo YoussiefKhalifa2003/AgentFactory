@@ -1,13 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FactoryProvider, useFactory } from "@/lib/factory";
 import { Strength } from "@/lib/types";
 import { Floor } from "./Floor";
 import { Inspector, FilePreview } from "./Inspector";
-import { PlantDots } from "./LiveStrip";
+import { PlantPanel } from "./PlantPanel";
 import { ListsSidebar } from "./MeetingsDock";
 import { Stage } from "./Stage";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { Kbd } from "./ui";
+import { ToastHost } from "./ui/Toast";
+import { CommandPalette } from "./CommandPalette";
+import { Insights } from "./Insights";
+import { ResultsGallery } from "./ResultsGallery";
 
 function Shell() {
   const {
@@ -23,10 +29,28 @@ function Shell() {
     closeStage,
     preview,
     closePreview,
+    setPaletteOpen,
+    setInsightsOpen,
+    setGalleryOpen,
+    plant,
+    quality,
+    setQuality,
   } = useFactory();
   const [dragStrength, setDragStrength] = useState<Strength | null>(null);
   const [pane, setPane] = useState<"lists" | "floor" | "desk">("floor");
   const selected = agents.find((a) => a.id === selectedId) || agents[0];
+  const view = stageOpen ? (stageMode === "desk" ? "desk3d" : "office") : "floor";
+
+  useEffect(() => {
+    if (plant?.local?.busy && quality === "high") setQuality("medium");
+  }, [plant?.local?.busy, quality, setQuality]);
+
+  useEffect(() => {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission().catch(() => undefined);
+    }
+  }, []);
 
   return (
     <div className="flex h-dvh min-h-0 gap-3 overflow-hidden px-3 py-3 sm:px-4 sm:py-3">
@@ -42,39 +66,43 @@ function Shell() {
           <div className="flex min-w-0 items-center gap-2.5">
             <span
               className="h-2 w-2 shrink-0 rounded-full"
-              style={{ background: connected ? "#2f7d4a" : "#b42318" }}
+              style={{ background: connected ? "var(--live)" : "var(--alert)" }}
               title={connected ? "Connected" : "Reconnecting"}
             />
-            <PlantDots />
             <h1 className="display truncate text-[1.55rem] leading-none">Workspace</h1>
+            <div className="hidden sm:block">
+              <SegmentedControl
+                ariaLabel="View"
+                value={view}
+                onChange={(next) => {
+                  if (next === "floor") closeStage();
+                  if (next === "office") {
+                    openOffice();
+                    setPane("floor");
+                  }
+                  if (next === "desk3d") {
+                    if (selected) openDesk(selected.id);
+                    setPane("floor");
+                  }
+                }}
+                options={[
+                  { id: "floor", label: "Floor" },
+                  { id: "office", label: "Office" },
+                  { id: "desk3d", label: "Desk" },
+                ]}
+              />
+            </div>
           </div>
           <div className="flex shrink-0 flex-nowrap items-center gap-1.5 sm:gap-2">
-            {stageOpen && (
-              <button type="button" onClick={closeStage} className="btn shrink-0">
-                Floor
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                openOffice();
-                setPane("floor");
-              }}
-              className={`btn shrink-0 ${stageMode === "office" ? "btn-solid" : ""}`}
-            >
-              Office
+            <PlantPanel />
+            <button type="button" className="btn btn-compact" onClick={() => setInsightsOpen(true)}>
+              Insights
             </button>
-            <button
-              type="button"
-              disabled={!selected}
-              onClick={() => {
-                if (!selected) return;
-                openDesk(selected.id);
-                setPane("floor");
-              }}
-              className={`btn shrink-0 ${stageMode === "desk" ? "btn-solid" : ""}`}
-            >
-              Desk
+            <button type="button" className="btn btn-compact" onClick={() => setGalleryOpen(true)}>
+              Results
+            </button>
+            <button type="button" className="btn btn-compact hidden md:inline-flex" onClick={() => setPaletteOpen(true)}>
+              <Kbd>Ctrl K</Kbd>
             </button>
             {!stageOpen && (
               <a href="/forge" className="btn btn-solid shrink-0">
@@ -109,7 +137,7 @@ function Shell() {
         </div>
         {!booted && <p className="text-sm text-[var(--ink-soft)]">Opening…</p>}
         {booted && offline && agents.length === 0 && (
-          <p className="text-sm text-[#b42318]">Can’t reach the API on port 8000.</p>
+          <p className="text-sm text-[var(--alert)]">Can’t reach the API on port 8000.</p>
         )}
         <div
           className={`grid min-h-0 flex-1 gap-3 overflow-hidden [&>*]:h-full [&>*]:min-h-0 ${
@@ -130,9 +158,11 @@ function Shell() {
           </div>
         </div>
       </div>
-      {preview && (
-        <FilePreview jobId={preview.jobId} file={preview.file} onClose={closePreview} />
-      )}
+      {preview && <FilePreview jobId={preview.jobId} file={preview.file} onClose={closePreview} />}
+      <CommandPalette />
+      <Insights />
+      <ResultsGallery />
+      <ToastHost />
     </div>
   );
 }
