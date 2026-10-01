@@ -9,10 +9,9 @@ export default function ForgePage() {
           Back to workspace
         </Link>
       </header>
-      <h1 className="mt-2 text-4xl font-semibold tracking-tight">New agent</h1>
+      <h1 className="mt-2 text-4xl font-semibold tracking-tight">Forge studio</h1>
       <p className="mt-3 max-w-xl text-[var(--ink-soft)]">
-        Look, mind, then tools. Spreadsheet and PDF leave files you can open on
-        the desk. The figure on the right is the same worker you open on the floor.
+        Shape a person, pick their mind and tools, then sit them on the floor. The stage on the left is the same worker you will see in the office.
       </p>
       <div className="mt-8">
         <ForgeForm />

@@ -6,31 +6,52 @@ import { API_URL, STRENGTHS } from "@/lib/types";
 import { splitPacks, useSkillCatalog } from "@/lib/skills";
 import { WorkerCanvas } from "./WorkerCanvas";
 import { ModelPicker } from "./ModelPicker";
+import {
+  ACCESSORIES,
+  AgentLook,
+  BODIES,
+  EYES,
+  HAIRS,
+  HEADS,
+  OUTFITS,
+  lookFromName,
+  randomLook,
+} from "@/lib/look";
+import { Chip } from "./ui/Chip";
 
 function pigmentFromName(name: string) {
-  const hues = [
-    "#D46A3A",
-    "#1AA6B8",
-    "#7C5CDB",
-    "#C45C8A",
-    "#3D8B5F",
-    "#C9A227",
-    "#2F6FED",
-  ];
+  const hues = ["#D46A3A", "#1AA6B8", "#7C5CDB", "#C45C8A", "#3D8B5F", "#C9A227", "#2F6FED"];
   return hues[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % hues.length];
+}
+
+async function lookPng(look: AgentLook, pigment: string) {
+  const url = (await import("@/lib/look")).lookSvg(look, pigment, 256);
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 256;
+  canvas.getContext("2d")!.drawImage(img, 0, 0);
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("png"))), "image/png");
+  });
 }
 
 export function ForgeForm() {
   const router = useRouter();
   const { tools } = useSkillCatalog();
-  const [step, setStep] = useState(0);
   const [colorSet, setColorSet] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pigment, setPigment] = useState("#D46A3A");
   const [strengths, setStrengths] = useState<string[]>(["coding"]);
   const [model, setModel] = useState("");
-  const [pfp, setPfp] = useState<string | null>(null);
+  const [look, setLookRaw] = useState<AgentLook>(() => lookFromName("New agent"));
+  const [lookEdited, setLookEdited] = useState(false);
+  const setLook = (next: AgentLook) => {
+    setLookEdited(true);
+    setLookRaw(next);
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,12 +61,13 @@ export function ForgeForm() {
       name: name || "New agent",
       description,
       pigment,
-      pfp,
+      pfp: null,
       strengths,
       model: model || "big-pickle",
       instructions: "",
+      look,
     }),
-    [name, description, pigment, pfp, strengths, model]
+    [name, description, pigment, strengths, model, look]
   );
 
   function toggleStrength(id: string) {
@@ -78,12 +100,20 @@ export function ForgeForm() {
           pigment,
           strengths,
           model: model || undefined,
-          pfp,
+          look,
         }),
       }).then(async (r) => {
         if (!r.ok) throw new Error(await r.text());
         return r.json();
       });
+      try {
+        const blob = await lookPng(look, pigment);
+        const body = new FormData();
+        body.append("file", blob, "look.png");
+        await fetch(`${API_URL}/api/agents/${created.id}/pfp`, { method: "POST", body });
+      } catch {
+        /* portrait is optional */
+      }
       router.push(`/?select=${created.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not forge");
@@ -93,175 +123,122 @@ export function ForgeForm() {
   }
 
   return (
-    <form onSubmit={onSubmit} className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(280px,360px)]">
+    <form onSubmit={onSubmit} className="grid items-start gap-8 lg:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
+      <div className="glass sticky top-6 self-start overflow-hidden rounded-[32px]">
+        <p className="px-5 pt-4 text-[11px] tracking-[0.22em] uppercase text-[var(--ink-soft)]">Studio</p>
+        <WorkerCanvas agent={preview} activity="idle" mode="preview" className="h-[360px] w-full" />
+      </div>
       <div className="space-y-6">
-        <ol className="flex gap-3 text-xs tracking-[0.2em] uppercase text-[var(--ink-soft)]">
-          {["Look", "Mind", "Tools"].map((label, i) => (
-            <li key={label}>
-              <button
-                type="button"
-                onClick={() => setStep(i)}
-                className={step === i ? "text-[var(--ink)]" : ""}
-              >
-                {String(i + 1).padStart(2, "0")} {label}
-              </button>
-            </li>
-          ))}
-        </ol>
-
-        {step === 0 && (
-          <div className="glass space-y-4 rounded-[28px] p-6">
-            <label className="block text-sm">
-              Name
-              <input
-                value={name}
-                onChange={(e) => {
-                  setName(e.target.value);
-                  if (!colorSet) setPigment(pigmentFromName(e.target.value));
-                }}
-                className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-3 outline-none"
-                placeholder="Newton"
-                required
-              />
-            </label>
-            <label className="block text-sm">
-              Pigment
-              <input
-                type="color"
-                value={pigment}
-                onChange={(e) => {
-                  setColorSet(true);
-                  setPigment(e.target.value);
-                }}
-                className="mt-2 h-12 w-full rounded-2xl bg-transparent"
-              />
-            </label>
-            <label className="block text-sm">
-              Portrait (identity media, not a face map)
-              <input
-                type="file"
-                accept="image/*"
-                className="mt-2"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  const reader = new FileReader();
-                  reader.onload = () => setPfp(String(reader.result));
-                  reader.readAsDataURL(file);
-                }}
-              />
-            </label>
-          </div>
-        )}
-
-        {step === 1 && (
-          <div className="glass space-y-4 rounded-[28px] p-6">
-            <label className="block text-sm">
-              Description
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                className="mt-2 min-h-[120px] w-full rounded-2xl bg-white/70 px-4 py-3 outline-none"
-                placeholder="What this bay is for"
-              />
-            </label>
-            <p className="text-sm text-[var(--ink-soft)]">
-              Pick one or two strengths. The first one you pick is the job this desk will actually do.
-            </p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {STRENGTHS.map((o) => (
-                <button
-                  type="button"
-                  key={o.id}
-                  onClick={() => toggleStrength(o.id)}
-                  className="rounded-2xl bg-white/70 px-4 py-3 text-left"
-                  style={{
-                    outline: strengths.includes(o.id)
-                      ? `2px solid ${pigment}`
-                      : undefined,
-                  }}
-                >
-                  <span className="font-medium">{o.label}</span>
-                  <span className="mt-1 block text-sm text-[var(--ink-soft)]">
-                    {o.copy}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {step === 2 && (
-          <div className="glass space-y-4 rounded-[28px] p-6">
-            <p className="text-sm text-[var(--ink-soft)]">
-              Optional tool skills. Strengths stay at two; these stack on top.
-            </p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {tools.map((o) => (
-                <button
-                  type="button"
-                  key={o.id}
-                  onClick={() => toggleTool(o.id)}
-                  className="rounded-2xl bg-white/70 px-4 py-3 text-left"
-                  style={{
-                    outline: strengths.includes(o.id) ? `2px solid ${pigment}` : undefined,
-                  }}
-                >
-                  <span className="font-medium">{o.label}</span>
-                  <span className="mt-1 block text-sm text-[var(--ink-soft)]">{o.copy}</span>
-                </button>
-              ))}
-            </div>
-            <p className="text-sm text-[var(--ink-soft)]">
-              Pick the brain this bay uses. Spark for the office DGX, the 4090 on
-              this machine, OpenRouter for a cloud desk, or OpenCode Zen if it is free.
-            </p>
-            <ModelPicker value={model} onChange={setModel} />
-            <button
-              type="submit"
-              disabled={busy || !name.trim()}
-              className="btn btn-pigment px-5 py-3"
-              style={{ background: pigment }}
-            >
-              {busy ? "Saving…" : "Create agent"}
-            </button>
-            {error && <p className="text-sm text-[#b42318]">{error}</p>}
-          </div>
-        )}
-
-        <div className="flex gap-3">
-          {step > 0 && (
+        <div className="glass space-y-4 rounded-[28px] p-6">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="display text-2xl">Look</h2>
             <button
               type="button"
-              onClick={() => setStep((s) => s - 1)}
-              className="btn"
+              className="btn btn-compact"
+              onClick={() => setLook(randomLook())}
             >
-              Back
+              Randomize
             </button>
-          )}
-          {step < 2 && (
-            <button
-              type="button"
-              disabled={step === 0 && !name.trim()}
-              onClick={() => setStep((s) => s + 1)}
-              className="btn btn-solid"
-            >
-              Next
-            </button>
-          )}
+          </div>
+          <label className="block text-sm">
+            Name
+            <input
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (!colorSet) setPigment(pigmentFromName(e.target.value));
+                if (!lookEdited) setLookRaw(lookFromName(e.target.value || "New agent", pigment));
+              }}
+              className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-3 outline-none"
+              placeholder="Newton"
+              required
+            />
+          </label>
+          <label className="block text-sm">
+            Pigment
+            <input
+              type="color"
+              value={pigment}
+              onChange={(e) => {
+                setColorSet(true);
+                setPigment(e.target.value);
+              }}
+              className="mt-2 h-12 w-full rounded-2xl bg-transparent"
+            />
+          </label>
+          <Row label="Body" options={BODIES} value={look.body} onPick={(body) => setLook({ ...look, body })} />
+          <Row label="Head" options={HEADS} value={look.head} onPick={(head) => setLook({ ...look, head })} />
+          <Row label="Hair" options={HAIRS} value={look.hair} onPick={(hair) => setLook({ ...look, hair })} />
+          <Row label="Eyes" options={EYES} value={look.eyes} onPick={(eyes) => setLook({ ...look, eyes })} />
+          <Row label="Outfit" options={OUTFITS} value={look.outfit} onPick={(outfit) => setLook({ ...look, outfit })} />
+          <Row
+            label="Accessory"
+            options={ACCESSORIES}
+            value={look.accessory}
+            onPick={(accessory) => setLook({ ...look, accessory })}
+          />
+        </div>
+        <div className="glass space-y-4 rounded-[28px] p-6">
+          <h2 className="display text-2xl">Mind</h2>
+          <label className="block text-sm">
+            Description
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="mt-2 min-h-[100px] w-full rounded-2xl bg-white/70 px-4 py-3 outline-none"
+              placeholder="What this bay is for"
+            />
+          </label>
+          <p className="text-sm text-[var(--ink-soft)]">One or two strengths. The first one is the job.</p>
+          <div className="flex flex-wrap gap-2">
+            {STRENGTHS.map((o) => (
+              <Chip key={o.id} on={strengths.includes(o.id)} pigment={pigment} onClick={() => toggleStrength(o.id)}>
+                {o.label}
+              </Chip>
+            ))}
+          </div>
+        </div>
+        <div className="glass space-y-4 rounded-[28px] p-6">
+          <h2 className="display text-2xl">Skills & model</h2>
+          <div className="flex flex-wrap gap-2">
+            {tools.map((o) => (
+              <Chip key={o.id} on={strengths.includes(o.id)} pigment={pigment} onClick={() => toggleTool(o.id)}>
+                {o.label}
+              </Chip>
+            ))}
+          </div>
+          <ModelPicker value={model} onChange={setModel} />
+          <button type="submit" disabled={busy || !name.trim()} className="btn btn-pigment px-5 py-3" style={{ background: pigment }}>
+            {busy ? "Savingâ€¦" : "Create agent"}
+          </button>
+          {error && <p className="text-sm text-[var(--alert)]">{error}</p>}
         </div>
       </div>
-      <div className="glass sticky top-6 self-start overflow-hidden rounded-[32px]">
-        <p className="px-5 pt-4 text-[11px] tracking-[0.22em] uppercase text-[var(--ink-soft)]">
-          Preview
-        </p>
-        <WorkerCanvas
-          agent={preview}
-          activity="idle"
-          mode="preview"
-          className="h-[320px] w-full"
-        />
-      </div>
     </form>
+  );
+}
+
+function Row<T extends string>({
+  label,
+  options,
+  value,
+  onPick,
+}: {
+  label: string;
+  options: readonly T[];
+  value: T;
+  onPick: (v: T) => void;
+}) {
+  return (
+    <div>
+      <p className="mb-1 text-[11px] uppercase tracking-[0.16em] text-[var(--ink-soft)]">{label}</p>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((opt) => (
+          <Chip key={opt} on={value === opt} onClick={() => onPick(opt)}>
+            {opt}
+          </Chip>
+        ))}
+      </div>
+    </div>
   );
 }
