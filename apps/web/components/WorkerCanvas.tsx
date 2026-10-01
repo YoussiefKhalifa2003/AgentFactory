@@ -6,6 +6,18 @@ import { ContactShadows, OrbitControls, RoundedBox, Text } from "@react-three/dr
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { Agent, Activity, strengthLabel } from "@/lib/types";
+import { AgentLook, parseLook } from "@/lib/look";
+import {
+  Bookshelf,
+  Clock,
+  FiddlePlant,
+  FloorLamp,
+  LeafyPlant,
+  SnakePlant,
+  SunShafts,
+  WaterDispenser,
+  Window,
+} from "./scene/OfficeDecor";
 
 export class WebGLFallback extends Component<
   { children: ReactNode; fallback: ReactNode },
@@ -38,16 +50,26 @@ export class WebGLFallback extends Component<
   }
 }
 
+function isTypingTarget(el: EventTarget | null) {
+  if (!(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+}
+
 export function FreeOrbit({
   lookAt,
   minDistance,
   maxDistance,
+  walk = false,
 }: {
   lookAt: [number, number, number];
   minDistance: number;
   maxDistance: number;
+  walk?: boolean;
 }) {
   const controls = useRef<OrbitControlsImpl>(null);
+  const keys = useRef(new Set<string>());
+  const steered = useRef(false);
   const x = lookAt[0];
   const y = lookAt[1];
   const z = lookAt[2];
@@ -55,9 +77,64 @@ export function FreeOrbit({
   useLayoutEffect(() => {
     const orbit = controls.current;
     if (!orbit) return;
-    orbit.target.set(x, y, z);
+    const next = new THREE.Vector3(x, y, z);
+    if (steered.current && next.distanceTo(orbit.target) < 2.4) return;
+    orbit.target.copy(next);
     orbit.update();
+    steered.current = false;
   }, [x, y, z]);
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || isTypingTarget(e.target)) return;
+      keys.current.add(e.code);
+    };
+    const up = (e: KeyboardEvent) => {
+      keys.current.delete(e.code);
+    };
+    const blur = () => keys.current.clear();
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+
+  useFrame((_, dt) => {
+    const orbit = controls.current;
+    if (!orbit || !walk) return;
+    const held = keys.current;
+    if (!held.size) return;
+    const cam = orbit.object;
+    const forward = new THREE.Vector3();
+    cam.getWorldDirection(forward);
+    forward.y = 0;
+    if (forward.lengthSq() < 0.0001) forward.set(0, 0, -1);
+    else forward.normalize();
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+    const move = new THREE.Vector3();
+    if (held.has("KeyW") || held.has("ArrowUp")) move.add(forward);
+    if (held.has("KeyS") || held.has("ArrowDown")) move.sub(forward);
+    if (held.has("KeyD") || held.has("ArrowRight")) move.add(right);
+    if (held.has("KeyA") || held.has("ArrowLeft")) move.sub(right);
+    if (held.has("KeyE")) move.y += 1;
+    if (held.has("KeyQ")) move.y -= 1;
+    if (move.lengthSq() === 0) return;
+    const boost = held.has("ShiftLeft") || held.has("ShiftRight") ? 2.2 : 1;
+    move.normalize().multiplyScalar(9.5 * boost * dt);
+    cam.position.add(move);
+    orbit.target.add(move);
+    if (cam.position.y < 0.7) {
+      const dy = 0.7 - cam.position.y;
+      cam.position.y += dy;
+      orbit.target.y += dy;
+    }
+    steered.current = true;
+    orbit.update();
+  });
 
   return (
     <OrbitControls
@@ -67,19 +144,22 @@ export function FreeOrbit({
       enableRotate
       enableZoom
       enableDamping
-      dampingFactor={0.08}
+      dampingFactor={0.1}
       screenSpacePanning
       minDistance={minDistance}
       maxDistance={maxDistance}
-      minPolarAngle={0.18}
-      maxPolarAngle={Math.PI / 2 - 0.05}
-      zoomSpeed={1.05}
-      rotateSpeed={0.62}
-      panSpeed={0.85}
-      onChange={() => {
-        const orbit = controls.current;
-        if (!orbit) return;
-        if (orbit.object.position.y < 0.55) orbit.object.position.y = 0.55;
+      minPolarAngle={0.1}
+      maxPolarAngle={Math.PI / 2 - 0.03}
+      zoomSpeed={walk ? 1.45 : 1.15}
+      rotateSpeed={walk ? 0.92 : 0.78}
+      panSpeed={walk ? 1.45 : 1.05}
+      mouseButtons={{
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.PAN,
+      }}
+      onStart={() => {
+        steered.current = true;
       }}
     />
   );
@@ -256,7 +336,7 @@ function DeskLamp({ on }: { on: boolean }) {
 function Exposure({ night }: { night: boolean }) {
   const gl = useThree((s) => s.gl);
   useEffect(() => {
-    gl.toneMappingExposure = night ? 0.68 : 1.08;
+    gl.toneMappingExposure = night ? 0.78 : 1.18;
   }, [gl, night]);
   return null;
 }
@@ -275,8 +355,23 @@ export function activityLabel(activity: Activity) {
   return LABELS[activity] || "Working";
 }
 
-function Cloth({ color, roughness = 0.82 }: { color: THREE.Color | string; roughness?: number }) {
-  return <meshStandardMaterial color={color} roughness={roughness} metalness={0.04} />;
+function liftColor(hex: THREE.Color, minL: number, sat = 0) {
+  const hsl = { h: 0, s: 0, l: 0 };
+  hex.getHSL(hsl);
+  hex.setHSL(hsl.h, THREE.MathUtils.clamp(hsl.s + sat, 0.28, 0.72), Math.max(minL, hsl.l));
+  return hex;
+}
+
+function Cloth({ color, roughness = 0.62 }: { color: THREE.Color | string; roughness?: number }) {
+  return (
+    <meshStandardMaterial
+      color={color}
+      roughness={roughness}
+      metalness={0}
+      emissive={color}
+      emissiveIntensity={0.16}
+    />
+  );
 }
 
 function useCanvasTexture(width: number, height: number) {
@@ -466,28 +561,28 @@ function elbowOf(
 }
 
 function OfficeChair() {
-  const leather = "#2f2b28";
-  const metal = "#1a1816";
+  const leather = "#d7c4ad";
+  const metal = "#a89480";
   return (
     <group>
       {[0, 1, 2, 3, 4].map((i) => (
         <group key={i} rotation={[0, (i * Math.PI * 2) / 5, 0]}>
           <mesh position={[0.17, 0.045, 0]} castShadow>
             <boxGeometry args={[0.32, 0.03, 0.055]} />
-            <meshStandardMaterial color={metal} metalness={0.55} roughness={0.35} />
+            <meshStandardMaterial color={metal} metalness={0.25} roughness={0.45} />
           </mesh>
           <mesh position={[0.32, 0.04, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
             <cylinderGeometry args={[0.035, 0.035, 0.045, 12]} />
-            <meshStandardMaterial color="#111" metalness={0.4} roughness={0.4} />
+            <meshStandardMaterial color="#8d7a68" metalness={0.2} roughness={0.5} />
           </mesh>
         </group>
       ))}
       <mesh position={[0, 0.22, 0]} castShadow>
         <cylinderGeometry args={[0.035, 0.04, 0.34, 12]} />
-        <meshStandardMaterial color={metal} metalness={0.5} roughness={0.32} />
+        <meshStandardMaterial color={metal} metalness={0.22} roughness={0.42} />
       </mesh>
       <RoundedBox args={[0.5, 0.07, 0.5]} radius={0.04} position={[0.04, 0.44, 0]} castShadow receiveShadow>
-        <meshStandardMaterial color={leather} roughness={0.7} />
+        <meshStandardMaterial color={leather} roughness={0.62} />
       </RoundedBox>
       <RoundedBox
         args={[0.08, 0.52, 0.48]}
@@ -497,8 +592,269 @@ function OfficeChair() {
         castShadow
         receiveShadow
       >
-        <meshStandardMaterial color={leather} roughness={0.7} />
+        <meshStandardMaterial color={leather} roughness={0.62} />
       </RoundedBox>
+    </group>
+  );
+}
+
+function OutfitExtras({
+  outfit,
+  shirt,
+  w,
+  accent,
+}: {
+  outfit: AgentLook["outfit"];
+  shirt: THREE.Color;
+  w: number;
+  accent: THREE.Color;
+}) {
+  const fx = 0.04 + 0.15 * (0.6 + 0.4 * w) - 0.003;
+  const dark = shirt.clone().offsetHSL(0, 0, -0.1);
+  switch (outfit) {
+    case "hoodie":
+      return (
+        <group>
+          <mesh position={[-0.04, 0.58, 0]} scale={[0.9, 0.6, 1.2 * w]} castShadow>
+            <sphereGeometry args={[0.11, 16, 12]} />
+            <Cloth color={shirt} />
+          </mesh>
+          <mesh position={[fx, 0.2, 0]} castShadow>
+            <boxGeometry args={[0.014, 0.08, 0.17 * w]} />
+            <Cloth color={dark} />
+          </mesh>
+        </group>
+      );
+    case "blazer":
+      return (
+        <group>
+          <mesh position={[fx, 0.45, 0]}>
+            <boxGeometry args={[0.012, 0.2, 0.075]} />
+            <meshStandardMaterial color="#f4f1ea" roughness={0.6} />
+          </mesh>
+          <mesh position={[fx + 0.004, 0.4, 0]}>
+            <boxGeometry args={[0.012, 0.15, 0.028]} />
+            <meshStandardMaterial color={accent} roughness={0.5} />
+          </mesh>
+          {[-1, 1].map((s) => (
+            <mesh key={s} position={[fx + 0.002, 0.45, s * 0.058 * w]} rotation={[s * 0.28, 0, 0]}>
+              <boxGeometry args={[0.014, 0.22, 0.05]} />
+              <Cloth color={dark} />
+            </mesh>
+          ))}
+        </group>
+      );
+    case "apron":
+      return (
+        <group>
+          <mesh position={[fx + 0.003, 0.22, 0]} castShadow>
+            <boxGeometry args={[0.014, 0.32, 0.2 * w]} />
+            <meshStandardMaterial color="#eadcc2" roughness={0.75} />
+          </mesh>
+          {[-1, 1].map((s) => (
+            <mesh key={s} position={[fx + 0.003, 0.52, s * 0.065 * w]}>
+              <boxGeometry args={[0.012, 0.14, 0.02]} />
+              <meshStandardMaterial color="#eadcc2" roughness={0.75} />
+            </mesh>
+          ))}
+        </group>
+      );
+    case "lab":
+      return (
+        <group>
+          {[-1, 1].map((s) => (
+            <mesh key={s} position={[fx - 0.002, 0.56, s * 0.065]} rotation={[s * 0.35, 0, 0]}>
+              <boxGeometry args={[0.03, 0.06, 0.06]} />
+              <Cloth color={shirt} />
+            </mesh>
+          ))}
+          <mesh position={[fx + 0.002, 0.25, 0.08 * w]}>
+            <boxGeometry args={[0.012, 0.06, 0.055]} />
+            <meshStandardMaterial color="#dcdcd6" roughness={0.6} />
+          </mesh>
+          <mesh position={[fx + 0.006, 0.29, 0.08 * w]}>
+            <boxGeometry args={[0.008, 0.04, 0.008]} />
+            <meshStandardMaterial color={accent} />
+          </mesh>
+        </group>
+      );
+    case "cardigan":
+      return (
+        <group>
+          <mesh position={[fx + 0.002, 0.3, 0]}>
+            <boxGeometry args={[0.012, 0.36, 0.02]} />
+            <meshStandardMaterial color="#5a4330" roughness={0.8} />
+          </mesh>
+          {[0.46, 0.36, 0.26].map((y) => (
+            <mesh key={y} position={[fx + 0.008, y, 0.03]}>
+              <sphereGeometry args={[0.012, 8, 8]} />
+              <meshStandardMaterial color="#5a4330" roughness={0.5} />
+            </mesh>
+          ))}
+        </group>
+      );
+    default:
+      return null;
+  }
+}
+
+function HeadParts({
+  look,
+  skin,
+  hair,
+  accent,
+}: {
+  look: AgentLook;
+  skin: string;
+  hair: string;
+  accent: THREE.Color;
+}) {
+  const square = look.head === "square";
+  const sc: [number, number, number] = look.head === "oval" ? [0.92, 1.14, 0.92] : [1, 1, 1];
+  const sy = sc[1];
+  const ex = square ? 0.127 : look.head === "oval" ? 0.121 : 0.13;
+  const top = square ? 0.13 : 0.138 * sy;
+  const eye = { round: [1, 1], almond: [1.1, 0.65], narrow: [0.9, 0.4], wide: [1.35, 1.1], sleepy: [1.1, 0.3] }[
+    look.eyes
+  ];
+  const hairMat = <meshStandardMaterial color={hair} roughness={0.72} emissive={hair} emissiveIntensity={0.1} />;
+  const cap = (scale: [number, number, number], y: number) => (
+    <mesh position={[0, y, 0]} scale={scale} castShadow>
+      <sphereGeometry args={[0.13, 18, 14]} />
+      {hairMat}
+    </mesh>
+  );
+  const ball = (x: number, y: number, z: number, r: number, key: string | number) => (
+    <mesh key={key} position={[x, y, z]} castShadow>
+      <sphereGeometry args={[r, 12, 10]} />
+      {hairMat}
+    </mesh>
+  );
+  return (
+    <group>
+      {square ? (
+        <RoundedBox args={[0.25, 0.26, 0.25]} radius={0.07} smoothness={4} castShadow>
+          <meshStandardMaterial color={skin} roughness={0.5} emissive={skin} emissiveIntensity={0.12} />
+        </RoundedBox>
+      ) : (
+        <mesh scale={sc} castShadow>
+          <sphereGeometry args={[0.138, 24, 24]} />
+          <meshStandardMaterial color={skin} roughness={0.5} emissive={skin} emissiveIntensity={0.12} />
+        </mesh>
+      )}
+
+      {/* face */}
+      {[-1, 1].map((s) => (
+        <group key={s}>
+          <mesh position={[ex, 0.012, s * 0.05]} scale={[0.5, eye[1], eye[0]]}>
+            <sphereGeometry args={[0.016, 10, 10]} />
+            <meshStandardMaterial color="#2a2623" roughness={0.3} />
+          </mesh>
+          <mesh
+            position={[ex - 0.002, 0.055, s * 0.05]}
+            rotation={[s * (look.brows === "arch" ? 0.3 : 0), 0, 0]}
+          >
+            <boxGeometry args={[0.006, look.brows === "thick" ? 0.012 : 0.006, 0.04]} />
+            <meshStandardMaterial color={hair} roughness={0.8} />
+          </mesh>
+        </group>
+      ))}
+      <mesh position={[ex - 0.002, -0.055, 0]} rotation={[look.mouth === "smirk" ? 0.25 : 0, 0, 0]}>
+        <boxGeometry args={[0.006, look.mouth === "smile" ? 0.012 : 0.007, look.mouth === "neutral" ? 0.04 : 0.05]} />
+        <meshStandardMaterial color="#9a4a3a" roughness={0.6} />
+      </mesh>
+
+      {/* hair */}
+      {look.hair === "short" && cap([1.04, 0.52, 1.04], top - 0.06)}
+      {look.hair === "fade" && cap([1.02, 0.38, 1.02], top - 0.05)}
+      {look.hair === "undercut" && (
+        <RoundedBox args={[0.2, 0.07, 0.16]} radius={0.03} position={[0.02, top + 0.005, 0]} castShadow>
+          {hairMat}
+        </RoundedBox>
+      )}
+      {look.hair === "wavy" && (
+        <group>
+          {cap([1.04, 0.55, 1.04], top - 0.06)}
+          {[0, 1, 2, 3, 4].map((i) => ball(Math.cos(i * 1.26) * 0.09, top - 0.045, Math.sin(i * 1.26) * 0.11, 0.05, i))}
+        </group>
+      )}
+      {look.hair === "curly" && (
+        <group>
+          {cap([1.0, 0.5, 1.0], top - 0.07)}
+          {Array.from({ length: 9 }, (_, i) =>
+            ball(
+              i === 8 ? 0 : Math.cos(i * 0.785) * 0.085,
+              i === 8 ? top + 0.03 : top - 0.03 - (i % 2) * 0.02,
+              i === 8 ? 0 : Math.sin(i * 0.785) * 0.1,
+              0.052,
+              i
+            )
+          )}
+        </group>
+      )}
+      {look.hair === "bun" && (
+        <group>
+          {cap([1.04, 0.52, 1.04], top - 0.06)}
+          {ball(-0.04, top + 0.06, 0, 0.065, "bun")}
+        </group>
+      )}
+      {look.hair === "long" && (
+        <group>
+          {cap([1.05, 0.56, 1.05], top - 0.06)}
+          <mesh position={[-0.1, -0.06, 0]} scale={[0.75, 1, 1.25]} castShadow>
+            <capsuleGeometry args={[0.1, 0.2, 6, 14]} />
+            {hairMat}
+          </mesh>
+        </group>
+      )}
+
+      {/* accessories */}
+      {look.accessory === "glasses" && (
+        <group>
+          {[-1, 1].map((s) => (
+            <mesh key={s} position={[ex + 0.006, 0.012, s * 0.05]} rotation={[0, Math.PI / 2, 0]}>
+              <torusGeometry args={[0.03, 0.005, 8, 20]} />
+              <meshStandardMaterial color="#1f1c1a" roughness={0.4} metalness={0.3} />
+            </mesh>
+          ))}
+          <mesh position={[ex + 0.006, 0.02, 0]}>
+            <boxGeometry args={[0.005, 0.005, 0.03]} />
+            <meshStandardMaterial color="#1f1c1a" />
+          </mesh>
+          {[-1, 1].map((s) => (
+            <mesh key={s} position={[0.03, 0.02, s * 0.1]}>
+              <boxGeometry args={[0.2, 0.005, 0.005]} />
+              <meshStandardMaterial color="#1f1c1a" />
+            </mesh>
+          ))}
+        </group>
+      )}
+      {look.accessory === "headphones" && (
+        <group>
+          <mesh position={[0, 0, 0]} rotation={[0, Math.PI / 2, 0]} castShadow>
+            <torusGeometry args={[0.15 * (square ? 1 : 1), 0.012, 8, 28, Math.PI]} />
+            <meshStandardMaterial color="#2a2623" roughness={0.4} />
+          </mesh>
+          {[-1, 1].map((s) => (
+            <mesh key={s} position={[0, 0, s * (square ? 0.135 : 0.14)]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+              <cylinderGeometry args={[0.052, 0.052, 0.035, 18]} />
+              <meshStandardMaterial color={accent} roughness={0.45} />
+            </mesh>
+          ))}
+        </group>
+      )}
+      {look.accessory === "cap" && (
+        <group>
+          <mesh position={[0, top - 0.11, 0]} scale={[1.05, 1, 1.05]} castShadow>
+            <sphereGeometry args={[0.145, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2]} />
+            <meshStandardMaterial color={accent} roughness={0.6} />
+          </mesh>
+          <mesh position={[0.15, top - 0.105, 0]} castShadow>
+            <boxGeometry args={[0.1, 0.012, 0.17]} />
+            <meshStandardMaterial color={accent} roughness={0.6} />
+          </mesh>
+        </group>
+      )}
     </group>
   );
 }
@@ -509,14 +865,34 @@ function Worker({ agent, activity }: { agent: Agent; activity: Activity }) {
   const leftHand = useRef<THREE.Group>(null);
   const rightHand = useRef<THREE.Group>(null);
   const color = useMemo(() => hexColor(agent.pigment), [agent.pigment]);
-  const shirt = useMemo(() => color.clone().offsetHSL(0, -0.05, 0.07), [color]);
-  const hair = useMemo(() => color.clone().offsetHSL(0.02, 0.04, -0.28), [color]);
-  const skin = "#e6b894";
+  const look = useMemo(
+    () => parseLook(agent.look, agent.name, agent.pigment),
+    [agent.look, agent.name, agent.pigment]
+  );
+  const shirt = useMemo(() => {
+    const base = liftColor(color.clone(), 0.46, 0.08);
+    switch (look.outfit) {
+      case "blazer":
+        return color.clone().offsetHSL(0, -0.12, -0.2);
+      case "lab":
+        return new THREE.Color("#f3f3ef");
+      case "cardigan":
+        return new THREE.Color("#b98f63").lerp(color, 0.25);
+      default:
+        return base;
+    }
+  }, [color, look.outfit]);
+  const hair = look.hairColor;
+  const skin = look.skin;
+  const pants = "#cbb59a";
+  // body build: width of torso/hips and shoulder spread
+  const build = { slim: { w: 0.82, s: 0.86 }, regular: { w: 1, s: 1 }, broad: { w: 1.28, s: 1.25 } }[look.body];
+  const sz = 0.19 * build.s;
 
-  const leftShoulder: [number, number, number] = [0.06, 0.46, 0.19];
-  const rightShoulder: [number, number, number] = [0.06, 0.46, -0.19];
-  const leftHome: [number, number, number] = [0.41, 0.31, 0.13];
-  const rightHome: [number, number, number] = [0.44, 0.318, -0.24];
+  const leftShoulder: [number, number, number] = [0.06, 0.46, sz];
+  const rightShoulder: [number, number, number] = [0.06, 0.46, -sz];
+  const leftHome: [number, number, number] = [0.41, 0.31, 0.13 + (build.s - 1) * 0.12];
+  const rightHome: [number, number, number] = [0.44, 0.318, -0.24 - (build.s - 1) * 0.12];
 
   useFrame((state) => {
     const t = state.clock.elapsedTime;
@@ -569,80 +945,45 @@ function Worker({ agent, activity }: { agent: Agent; activity: Activity }) {
 
   return (
     <group position={[0.22, 0.47, 0]}>
+      <group scale={[1, 1, 0.85 + build.w * 0.15 + (build.s - 1) * 0.5]}>
       <mesh position={[0.2, -0.02, 0.1]} rotation={[0, 0, Math.PI / 2]} castShadow>
         <capsuleGeometry args={[0.072, 0.26, 6, 14]} />
-        <Cloth color="#2c2825" />
+        <Cloth color={pants} />
       </mesh>
       <mesh position={[0.2, -0.02, -0.1]} rotation={[0, 0, Math.PI / 2]} castShadow>
         <capsuleGeometry args={[0.072, 0.26, 6, 14]} />
-        <Cloth color="#2c2825" />
+        <Cloth color={pants} />
       </mesh>
       <mesh position={[0.36, -0.22, 0.1]} castShadow>
         <capsuleGeometry args={[0.064, 0.28, 6, 14]} />
-        <Cloth color="#2c2825" />
+        <Cloth color={pants} />
       </mesh>
       <mesh position={[0.36, -0.22, -0.1]} castShadow>
         <capsuleGeometry args={[0.064, 0.28, 6, 14]} />
-        <Cloth color="#2c2825" />
+        <Cloth color={pants} />
       </mesh>
       <RoundedBox args={[0.18, 0.05, 0.09]} radius={0.02} position={[0.44, -0.42, 0.1]} castShadow>
-        <meshStandardMaterial color="#1c1814" roughness={0.6} />
+        <meshStandardMaterial color="#a89078" roughness={0.7} />
       </RoundedBox>
       <RoundedBox args={[0.18, 0.05, 0.09]} radius={0.02} position={[0.44, -0.42, -0.1]} castShadow>
-        <meshStandardMaterial color="#1c1814" roughness={0.6} />
+        <meshStandardMaterial color="#a89078" roughness={0.7} />
       </RoundedBox>
+      </group>
 
       <group ref={torso}>
-        <mesh position={[0.04, 0.3, 0]} castShadow>
+        <mesh position={[0.04, 0.3, 0]} scale={[0.6 + build.w * 0.4, 1, build.w]} castShadow>
           <capsuleGeometry args={[0.15, 0.34, 8, 16]} />
-          <Cloth color={shirt} roughness={0.74} />
+          <Cloth color={shirt} roughness={0.62} />
         </mesh>
-        <mesh position={[0.05, 0.5, 0]} rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[0.12, 0.03, 10, 20]} />
-          <Cloth color={shirt} roughness={0.7} />
-        </mesh>
-
+        <OutfitExtras outfit={look.outfit} shirt={shirt} w={build.w} accent={color} />
+        {look.accessory === "scarf" && (
+          <mesh position={[0.07, 0.6, 0]} rotation={[Math.PI / 2, 0, 0.1]} castShadow>
+            <torusGeometry args={[0.1 + (build.w - 1) * 0.03, 0.04, 10, 24]} />
+            <Cloth color={color.clone().offsetHSL(0.5, 0, 0)} />
+          </mesh>
+        )}
         <group ref={head} position={[0.08, 0.66, 0]}>
-          <mesh scale={[0.96, 1.05, 0.92]} castShadow>
-            <sphereGeometry args={[0.13, 28, 28]} />
-            <meshStandardMaterial color={skin} roughness={0.52} />
-          </mesh>
-          <mesh position={[-0.02, 0.07, 0]} scale={[1.02, 0.72, 1.08]} castShadow>
-            <sphereGeometry args={[0.132, 22, 18]} />
-            <meshStandardMaterial color={hair} roughness={0.78} />
-          </mesh>
-          <mesh position={[0.08, 0.08, 0]} rotation={[0, 0, -0.7]} scale={[0.7, 0.22, 1]}>
-            <sphereGeometry args={[0.1, 16, 12]} />
-            <meshStandardMaterial color={hair} roughness={0.78} />
-          </mesh>
-          <mesh position={[0.105, 0.02, 0.052]}>
-            <sphereGeometry args={[0.024, 12, 12]} />
-            <meshStandardMaterial color="#fbf7f2" />
-          </mesh>
-          <mesh position={[0.105, 0.02, -0.052]}>
-            <sphereGeometry args={[0.024, 12, 12]} />
-            <meshStandardMaterial color="#fbf7f2" />
-          </mesh>
-          <mesh position={[0.122, 0.02, 0.052]}>
-            <sphereGeometry args={[0.012, 10, 10]} />
-            <meshStandardMaterial color="#1c1814" />
-          </mesh>
-          <mesh position={[0.122, 0.02, -0.052]}>
-            <sphereGeometry args={[0.012, 10, 10]} />
-            <meshStandardMaterial color="#1c1814" />
-          </mesh>
-          <mesh position={[0.128, -0.01, 0]}>
-            <boxGeometry args={[0.03, 0.028, 0.022]} />
-            <meshStandardMaterial color="#d9a07e" roughness={0.55} />
-          </mesh>
-          <mesh position={[0.02, 0.01, 0.12]} scale={[0.7, 1, 0.5]}>
-            <sphereGeometry args={[0.028, 10, 10]} />
-            <meshStandardMaterial color={skin} roughness={0.55} />
-          </mesh>
-          <mesh position={[0.02, 0.01, -0.12]} scale={[0.7, 1, 0.5]}>
-            <sphereGeometry args={[0.028, 10, 10]} />
-            <meshStandardMaterial color={skin} roughness={0.55} />
-          </mesh>
+          <HeadParts look={look} skin={skin} hair={hair} accent={color} />
         </group>
       </group>
 
@@ -664,14 +1005,16 @@ function Worker({ agent, activity }: { agent: Agent; activity: Activity }) {
       />
 
       <group ref={leftHand} position={leftHome}>
-        <RoundedBox args={[0.085, 0.032, 0.072]} radius={0.012} rotation={[0.2, 0.08, 0.05]} castShadow>
+        <mesh castShadow>
+          <sphereGeometry args={[0.038, 12, 12]} />
           <meshStandardMaterial color={skin} roughness={0.55} />
-        </RoundedBox>
+        </mesh>
       </group>
       <group ref={rightHand} position={rightHome}>
-        <RoundedBox args={[0.078, 0.03, 0.058]} radius={0.012} rotation={[0.2, -0.1, -0.08]} castShadow>
+        <mesh castShadow>
+          <sphereGeometry args={[0.036, 12, 12]} />
           <meshStandardMaterial color={skin} roughness={0.55} />
-        </RoundedBox>
+        </mesh>
       </group>
     </group>
   );
@@ -690,6 +1033,7 @@ function Desk({
   const keys = useCanvasTexture(512, 200);
   const color = useMemo(() => hexColor(agent.pigment), [agent.pigment]);
   const glow = useRef<THREE.PointLight>(null);
+  const lastPaint = useRef(0);
 
   useMemo(() => {
     if (keys.ctx) paintKeys(keys.ctx);
@@ -697,8 +1041,10 @@ function Desk({
   }, [keys]);
 
   useFrame((state) => {
-    if (screen.ctx) {
-      paintScreen(screen.ctx, activity, agent.pigment, state.clock.elapsedTime, feed);
+    const now = state.clock.elapsedTime;
+    if (screen.ctx && now - lastPaint.current > 1 / 15) {
+      lastPaint.current = now;
+      paintScreen(screen.ctx, activity, agent.pigment, now, feed);
       screen.texture.needsUpdate = true;
     }
     if (glow.current) {
@@ -734,15 +1080,15 @@ function Desk({
       <group position={[1.2, 0.76, 0]} rotation={[0, 0.12, 0]}>
         <mesh position={[0, 0.018, 0]} castShadow>
           <boxGeometry args={[0.16, 0.02, 0.16]} />
-          <meshStandardMaterial color="#1c1814" metalness={0.35} roughness={0.4} />
+          <meshStandardMaterial color="#7a6e62" metalness={0.2} roughness={0.48} />
         </mesh>
         <mesh position={[0, 0.16, 0]} castShadow>
           <cylinderGeometry args={[0.018, 0.024, 0.28, 10]} />
-          <meshStandardMaterial color="#1c1814" metalness={0.4} roughness={0.35} />
+          <meshStandardMaterial color="#7a6e62" metalness={0.2} roughness={0.45} />
         </mesh>
         <group position={[0, 0.4, 0]}>
           <RoundedBox args={[0.045, 0.36, 0.58]} radius={0.012} castShadow>
-            <meshStandardMaterial color="#1b1a18" metalness={0.45} roughness={0.32} />
+            <meshStandardMaterial color="#5e564e" metalness={0.22} roughness={0.4} />
           </RoundedBox>
           <mesh position={[-0.026, 0, 0]} rotation={[0, -Math.PI / 2, 0]}>
             <planeGeometry args={[0.52, 0.31]} />
@@ -763,7 +1109,7 @@ function Desk({
       <group position={[0.7, 0.761, 0.04]}>
         <mesh position={[0, 0.01, 0]} castShadow receiveShadow>
           <boxGeometry args={[0.15, 0.016, 0.34]} />
-          <meshStandardMaterial color="#2f2b28" roughness={0.55} />
+          <meshStandardMaterial color="#8a7d70" roughness={0.55} />
         </mesh>
         <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, Math.PI / 2]} receiveShadow>
           <planeGeometry args={[0.32, 0.13]} />
@@ -860,7 +1206,15 @@ function Room({ pigment, night }: { pigment: string; night: boolean }) {
         />
       </mesh>
       <pointLight position={[0.72, 2.12, -0.15]} intensity={night ? 0.55 : 1.4} distance={7} color="#ffe2b8" />
-      <CornerPlant position={[-1.2, 0, -1.45]} />
+      <Window x={-1.55} y={1.62} z={0.15} night={night} />
+      {!night && <SunShafts x={-1.45} y={1.62} z={0.15} />}
+      <Bookshelf position={[1.75, 0, -1.66]} night={night} />
+      <Clock position={[0.2, 2.3, -1.83]} />
+      <WaterDispenser position={[-0.95, 0, -1.6]} />
+      <FiddlePlant position={[2.98, 0, -1.3]} scale={1.05} seed={7} />
+      <LeafyPlant position={[-1.25, 0, 1.45]} scale={1} seed={3} potColor="#c45c2c" />
+      <SnakePlant position={[-1.3, 0, -0.85]} scale={0.95} seed={5} />
+      <FloorLamp position={[3.0, 0, 0.3]} night={night} />
     </group>
   );
 }
@@ -882,7 +1236,7 @@ export function Station({
   return (
     <group>
       {room && <Room pigment={agent.pigment} night={night} />}
-      <group rotation={[0, room ? 0.36 : 0.12, 0]}>
+      <group rotation={[0, room ? 0.42 : 0.38, 0]}>
         <group position={[0.08, 0, 0]}>
           <OfficeChair />
         </group>
@@ -957,11 +1311,11 @@ export function WorkerCanvas({
           <color attach="background" args={[night ? "#12100e" : "#d9cbb8"]} />
           <fog attach="fog" args={[night ? "#12100e" : "#d9cbb8", 18, 70]} />
           <Exposure night={night} />
-          <ambientLight intensity={night ? 0.1 : 0.3} />
-          <hemisphereLight args={night ? ["#3a2e24", "#0c0a09", 0.24] : ["#fff6ea", "#c4b49a", 0.48]} />
+          <ambientLight intensity={night ? 0.22 : 0.58} />
+          <hemisphereLight args={night ? ["#3a2e24", "#0c0a09", 0.36] : ["#fffaf2", "#d2c0a6", 0.72]} />
           <directionalLight
             position={[-2.8, 5.4, 1.4]}
-            intensity={night ? 0.14 : 1.45}
+            intensity={night ? 0.22 : 1.55}
             color={night ? "#8aa0c8" : "#fff3dc"}
             castShadow={!night}
             shadow-mapSize-width={2048}
@@ -994,7 +1348,7 @@ export function WorkerCanvas({
             <p className="mt-1 text-sm font-medium">{activityLabel(activity)}</p>
           </div>
           {!preview && (
-            <p className="mb-1 text-xs text-[var(--ink-soft)]">Drag to look · right-drag to pan · scroll to zoom</p>
+            <p className="mb-1 text-xs text-[var(--ink-soft)]">Drag to look · right-drag or WASD to move · scroll to zoom</p>
           )}
         </div>
       </div>
