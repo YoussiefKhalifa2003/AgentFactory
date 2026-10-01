@@ -1,4 +1,5 @@
 import { apiUrl } from "./config";
+import { lookSvg, parseLook } from "./look";
 
 export type Strength =
   | "coding"
@@ -35,6 +36,7 @@ export type Agent = {
   strengths: string[];
   model: string;
   instructions: string;
+  look?: Record<string, string> | null;
 };
 
 export type Artifact = {
@@ -176,7 +178,8 @@ export function bayCopy(agent: Agent) {
 }
 
 export function portrait(agent: Agent) {
-  return pfpSrc(apiUrl(), agent.pfp) || badgeDataUrl(agent.name, agent.pigment);
+  if (agent.pfp) return pfpSrc(apiUrl(), agent.pfp);
+  return lookSvg(parseLook(agent.look, agent.name, agent.pigment), agent.pigment);
 }
 
 export function statusLabel(activity?: string, status?: string) {
