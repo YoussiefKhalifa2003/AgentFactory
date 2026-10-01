@@ -1,62 +1,78 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useFactory } from "@/lib/factory";
-import { Strength, badgeDataUrl, pfpSrc } from "@/lib/types";
+import { Strength } from "@/lib/types";
 import { Bay } from "./Bay";
+import { CrewStrip } from "./CrewStrip";
+import { isWorking } from "@/lib/status";
 
-function isWorking(status?: string) {
-  return ["queued", "thinking", "tool"].includes(status || "");
-}
+const Diorama = dynamic(() => import("./scene/Diorama").then((m) => m.Diorama), { ssr: false });
 
 export function Floor({ matchStrength = null }: { matchStrength?: Strength | null }) {
-  const { agents, live, selectedId, openOffice, openDesk } = useFactory();
+  const { agents, live, selectedId, openOffice, openDesk, quality, offline, booted } = useFactory();
   const working = agents.filter((a) => isWorking(live[a.id]?.job?.status));
-  const faces = (working.length ? working : agents).slice(0, 4);
-  const extra = Math.max(0, (working.length ? working : agents).length - faces.length);
-
+  const ordered = [...agents].sort((a, b) => {
+    const aw = isWorking(live[a.id]?.job?.status) ? 0 : 1;
+    const bw = isWorking(live[b.id]?.job?.status) ? 0 : 1;
+    return aw - bw;
+  });
   const selected = agents.find((a) => a.id === selectedId);
+
+  if (booted && offline && agents.length === 0) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center rounded-[28px] bg-white/40 p-8 text-center">
+        <p className="display text-2xl">Can’t reach the API</p>
+        <p className="mt-2 max-w-sm text-sm text-[var(--ink-soft)]">The factory on port 8000 is offline.</p>
+        <button type="button" className="btn btn-solid mt-5" onClick={() => window.location.reload()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (booted && agents.length === 0) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center rounded-[28px] bg-white/40 p-8 text-center">
+        <p className="display text-3xl">Empty floor</p>
+        <p className="mt-2 max-w-sm text-sm text-[var(--ink-soft)]">
+          Forge an agent, then drop a list item on their desk.
+        </p>
+        <a href="/forge" className="btn btn-solid mt-5">
+          New agent
+        </a>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full min-h-0 overflow-auto rounded-[28px] bg-white/40 p-4">
-      <div className="mb-4 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => openOffice()}
-          className="flex min-w-0 flex-1 items-center gap-3 rounded-[22px] bg-white/90 px-3 py-2.5 text-left transition hover:bg-white"
-        >
-        {faces.length > 0 && (
-          <div className="flex shrink-0 items-center">
-            {faces.map((agent, i) => (
-              <img
-                key={agent.id}
-                src={pfpSrc(agent.pfp) || badgeDataUrl(agent.name, agent.pigment)}
-                alt=""
-                className="h-8 w-8 rounded-xl object-cover ring-2 ring-white"
-                style={{ marginLeft: i === 0 ? 0 : -8 }}
-              />
-            ))}
-            {extra > 0 && (
-              <span className="ml-1.5 text-[11px] text-[var(--ink-soft)]">+{extra}</span>
-            )}
+      <button
+        type="button"
+        onClick={() => openOffice()}
+        className="mb-3 block h-[13.5rem] w-full overflow-hidden rounded-[22px] bg-[#d9cbb8] text-left ring-1 ring-black/[0.04]"
+        aria-label="Open the office"
+      >
+        {quality === "off" ? (
+          <div className="flex h-full items-end justify-between px-4 py-3">
+            <span className="display text-[1.35rem]">Office</span>
+            {working.length > 0 && <span className="text-xs text-[var(--ink-soft)]">{working.length} working</span>}
           </div>
+        ) : (
+          <Diorama />
         )}
-        <span className="display text-[1.35rem] leading-none">Office</span>
-        {working.length > 0 && (
-          <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-[#2f7d4a]" />
-        )}
-        </button>
+      </button>
+      <div className="mb-3 flex items-center gap-2">
+        <p className="display text-[1.35rem] leading-none">Floor</p>
         {selected && (
-          <button
-            type="button"
-            onClick={() => openDesk(selected.id)}
-            className="btn shrink-0"
-          >
-            Desk
+          <button type="button" onClick={() => openDesk(selected.id)} className="btn btn-compact ml-auto">
+            {selected.name}&rsquo;s desk
           </button>
         )}
       </div>
+      <CrewStrip />
       <div className="grid auto-rows-fr items-stretch gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {agents.map((agent) => (
+        {ordered.map((agent) => (
           <Bay
             key={agent.id}
             agent={agent}
@@ -64,11 +80,6 @@ export function Floor({ matchStrength = null }: { matchStrength?: Strength | nul
           />
         ))}
       </div>
-      {agents.length === 0 && (
-        <div className="flex min-h-[180px] items-center justify-center">
-          <p className="text-sm text-[var(--ink-soft)]">Forge an agent to fill the floor.</p>
-        </div>
-      )}
     </div>
   );
 }
