@@ -12,33 +12,15 @@ import {
   Chain,
   LiveState,
   PinCard,
+  PlantSnapshot,
 } from "@/lib/types";
 import { Station, WebGLFallback, FreeOrbit } from "./WorkerCanvas";
-
-const GAP_X = 4.35;
-const GAP_Z = 4.65;
+import { GAP_X, GAP_Z, deskPos, deskSlots, hallShell, overlapHits } from "./scene/layout";
+import { PlantGear } from "./scene/PlantGear";
+import { OfficeDecor } from "./scene/OfficeDecor";
 
 function busy(status?: string) {
   return ["queued", "thinking", "tool"].includes(status || "");
-}
-
-function colsFor(n: number) {
-  if (n <= 1) return 1;
-  if (n <= 4) return 2;
-  if (n <= 9) return 3;
-  return 4;
-}
-
-function deskSlots(count: number) {
-  const cols = colsFor(Math.max(count, 1));
-  const rows = Math.max(1, Math.ceil(Math.max(count, 1) / cols));
-  return { cols, rows };
-}
-
-function deskPos(index: number, cols: number): [number, number, number] {
-  const col = index % cols;
-  const row = Math.floor(index / cols);
-  return [col * GAP_X, 0, 2.55 + row * GAP_Z];
 }
 
 function isPicture(file: Artifact) {
@@ -59,9 +41,18 @@ function canvasTexture(paint: (ctx: CanvasRenderingContext2D, size: number) => v
   return tex;
 }
 
+function paintRng(seed: number) {
+  let s = seed >>> 0 || 1;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
 function useStudioMaps(night: boolean) {
   return useMemo(() => {
     const floor = canvasTexture((ctx, s) => {
+      const r = paintRng(night ? 21 : 11);
       ctx.fillStyle = night ? "#2a241f" : "#dcc9ae";
       ctx.fillRect(0, 0, s, s);
       const plank = s / 8;
@@ -76,19 +67,20 @@ function useStudioMaps(night: boolean) {
       }
       for (let i = 0; i < 90; i++) {
         ctx.fillStyle = night ? "rgba(0,0,0,0.08)" : "rgba(60,35,18,0.045)";
-        ctx.fillRect(Math.random() * s, Math.random() * s, 2 + Math.random() * 48, 1);
+        ctx.fillRect(r() * s, r() * s, 2 + r() * 48, 1);
       }
     });
     floor.wrapS = floor.wrapT = THREE.RepeatWrapping;
     floor.repeat.set(12, 12);
 
     const wall = canvasTexture((ctx, s) => {
+      const r = paintRng(night ? 23 : 13);
       ctx.fillStyle = night ? "#322c27" : "#f3ece3";
       ctx.fillRect(0, 0, s, s);
       for (let i = 0; i < 400; i++) {
         const n = night ? 20 : 238;
-        ctx.fillStyle = `rgba(${n},${n - 6},${n - 14},${0.04 + Math.random() * 0.05})`;
-        ctx.fillRect(Math.random() * s, Math.random() * s, 2, 2);
+        ctx.fillStyle = `rgba(${n},${n - 6},${n - 14},${0.04 + r() * 0.05})`;
+        ctx.fillRect(r() * s, r() * s, 2, 2);
       }
     });
     wall.wrapS = wall.wrapT = THREE.RepeatWrapping;
@@ -97,23 +89,39 @@ function useStudioMaps(night: boolean) {
     const sky = canvasTexture((ctx, s) => {
       const g = ctx.createLinearGradient(0, 0, 0, s);
       if (night) {
-        g.addColorStop(0, "#0b1020");
-        g.addColorStop(0.55, "#1a2744");
-        g.addColorStop(1, "#2a1c14");
+        g.addColorStop(0, "#0a1020");
+        g.addColorStop(0.55, "#18243c");
+        g.addColorStop(1, "#2a1e18");
       } else {
-        g.addColorStop(0, "#8ec4e8");
-        g.addColorStop(0.45, "#c5dcea");
-        g.addColorStop(1, "#f0e4cc");
+        g.addColorStop(0, "#7eb7e0");
+        g.addColorStop(0.38, "#b9d7ea");
+        g.addColorStop(0.7, "#e7dcc4");
+        g.addColorStop(1, "#f3e6c8");
       }
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, s, s);
-      ctx.fillStyle = night ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.55)";
-      for (let i = 0; i < (night ? 40 : 6); i++) {
+      if (night) {
+        const r = paintRng(7);
+        for (let i = 0; i < 48; i++) {
+          ctx.fillStyle = `rgba(255,255,255,${0.35 + r() * 0.5})`;
+          ctx.fillRect(r() * s, r() * s * 0.62, 1, 1);
+        }
+      } else {
+        const sun = ctx.createRadialGradient(s * 0.72, s * 0.36, 4, s * 0.72, s * 0.36, 48);
+        sun.addColorStop(0, "rgba(255,244,210,0.95)");
+        sun.addColorStop(1, "rgba(255,244,210,0)");
+        ctx.fillStyle = sun;
+        ctx.fillRect(0, 0, s, s);
+        ctx.fillStyle = "rgba(255,255,255,0.32)";
         ctx.beginPath();
-        ctx.arc(Math.random() * s, Math.random() * s * 0.45, night ? 0.7 : 18, 0, Math.PI * 2);
+        ctx.ellipse(s * 0.28, s * 0.28, 34, 14, -0.2, 0, Math.PI * 2);
+        ctx.ellipse(s * 0.4, s * 0.26, 20, 10, 0.12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(s * 0.68, s * 0.2, 24, 11, 0.18, 0, Math.PI * 2);
         ctx.fill();
       }
-    }, 128);
+    }, 256);
 
     return { floor, wall, sky };
   }, [night]);
@@ -122,7 +130,7 @@ function useStudioMaps(night: boolean) {
 function Exposure({ night }: { night: boolean }) {
   const gl = useThree((s) => s.gl);
   useEffect(() => {
-    gl.toneMappingExposure = night ? 0.62 : 0.98;
+    gl.toneMappingExposure = night ? 0.74 : 1.16;
     gl.shadowMap.autoUpdate = true;
   }, [gl, night]);
   return null;
@@ -212,28 +220,18 @@ function Plant({ position, scale = 1 }: { position: [number, number, number]; sc
   );
 }
 
-function hallShell(width: number, depth: number) {
-  const thick = 0.22;
-  const wallH = 4.7;
-  const x0 = -2.35;
-  const x1 = width + 1.2;
-  const z0 = -1.08;
-  const z1 = depth + 1.4;
-  const midX = (x0 + x1) / 2;
-  const midZ = (z0 + z1) / 2;
-  const innerW = x1 - x0;
-  const innerD = z1 - z0;
-  return { thick, wallH, x0, x1, z0, z1, midX, midZ, innerW, innerD };
-}
-
 function Hall({
   width,
   depth,
   night,
+  cols,
+  count,
 }: {
   width: number;
   depth: number;
   night: boolean;
+  cols: number;
+  count: number;
 }) {
   const maps = useStudioMaps(night);
   const { thick, wallH, x0, x1, z0, z1, midX, midZ, innerW, innerD } = hallShell(width, depth);
@@ -331,9 +329,17 @@ function Hall({
       <Pendant position={[midX + 1.55, wallH - 1.15, midZ + 1.35]} night={night} />
       {depth > 12 && <Pendant position={[midX, wallH - 1.15, midZ + 3.6]} night={night} />}
 
-      <Plant position={[x0 + 0.85, 0, z0 + 0.85]} />
-      <Plant position={[x1 - 0.7, 0, z1 - 0.55]} scale={1.12} />
-      <Plant position={[x0 + 0.9, 0, z1 - 0.5]} scale={0.85} />
+      <OfficeDecor
+        x0={x0}
+        x1={x1}
+        z0={z0}
+        z1={z1}
+        wallH={wallH}
+        windowZs={windowZs}
+        cols={cols}
+        count={count}
+        night={night}
+      />
 
       <RoundedBox args={[0.3, wallH, 0.3]} radius={0.03} position={[x0 + 0.12, wallH / 2, z0 + 0.12]}>
         <meshStandardMaterial color={night ? "#3a332c" : "#e7d7c2"} roughness={0.8} />
@@ -561,41 +567,27 @@ function ShowroomWall({
   night: boolean;
   onOpen: (pin: PinCard) => void;
 }) {
-  const cards = pins.filter((p) => p.artifact).slice(0, 7);
+  const cards = pins.filter((p) => p.artifact && isPicture(p.artifact)).slice(0, 5);
+  if (!cards.length) return null;
   const cx = width / 2 - GAP_X / 2;
-  const frames = cards.length ? cards : [null, null, null];
   return (
     <group position={[cx, 0, -1.06]}>
       <mesh position={[0, 0.42, 0.12]} castShadow>
-        <boxGeometry args={[Math.min(width + 2.4, 11), 0.08, 0.28]} />
+        <boxGeometry args={[Math.min(width * 0.55, cards.length * 1.4 + 1.2), 0.08, 0.28]} />
         <meshStandardMaterial color={night ? "#3a322c" : "#6b4a32"} roughness={0.48} />
       </mesh>
-      <spotLight
-        position={[0, 2.55, 1.35]}
-        rotation={[-0.85, 0, 0]}
-        angle={0.62}
-        penumbra={0.85}
-        intensity={night ? 2.4 : 4.2}
-        color="#ffe6c4"
-        distance={8}
-        castShadow={false}
-      />
-      {frames.map((pin, i) => {
-        const n = frames.length;
-        const spread = Math.min(width + 1.6, Math.max(n * 1.42, 2.4));
+      {cards.map((pin, i) => {
+        const n = cards.length;
+        const spread = Math.min(width * 0.5, Math.max(n * 1.35, 1.4));
         const x = n === 1 ? 0 : -spread / 2 + (i / Math.max(n - 1, 1)) * spread;
-        if (!pin) {
-          return <Frame key={`empty-${i}`} position={[x, 1.52, 0.08]} night={night} />;
-        }
         const art = pin.artifact!;
         return (
           <Frame
             key={pin.id}
             position={[x, 1.52, 0.08]}
             night={night}
-            photo={isPicture(art)}
+            photo
             src={`${API_URL}/api/artifacts/${art.id}/file`}
-            paper={art.kind === "pack" ? "#f2e6d4" : "#efe8dc"}
             onOpen={() => onOpen(pin)}
           />
         );
@@ -634,8 +626,11 @@ function OfficeScene({
   chains,
   showroom,
   night,
+  plant,
   onSelect,
   onPreview,
+  orbit = true,
+  diorama = false,
 }: {
   agents: Agent[];
   live: Record<string, LiveState>;
@@ -643,8 +638,11 @@ function OfficeScene({
   chains: Record<string, Chain>;
   showroom: PinCard[];
   night: boolean;
+  plant?: PlantSnapshot | null;
   onSelect: (id: string) => void;
   onPreview: (jobId: string, file: Artifact) => void;
+  orbit?: boolean;
+  diorama?: boolean;
 }) {
   const { cols, rows } = deskSlots(agents.length);
   const width = Math.max(cols * GAP_X, 8.2);
@@ -659,20 +657,24 @@ function OfficeScene({
   const to = relay ? spots.get(relay.toId) : null;
   const cx = width / 2 - GAP_X / 2;
 
+  useEffect(() => {
+    overlapHits(agents.length);
+  }, [agents.length]);
+
   return (
     <>
       <color attach="background" args={[night ? "#12100e" : "#d9cbb8"]} />
-      <fog attach="fog" args={[night ? "#12100e" : "#d9cbb8", 36, 120]} />
+      {!diorama && <fog attach="fog" args={[night ? "#12100e" : "#d9cbb8", 36, 120]} />}
       <Exposure night={night} />
-      <ambientLight intensity={night ? 0.12 : 0.38} />
-      <hemisphereLight args={night ? ["#3a2e24", "#0c0a09", 0.28] : ["#fff6ea", "#c4b49a", 0.48]} />
+      <ambientLight intensity={night ? 0.24 : diorama ? 0.78 : 0.68} />
+      <hemisphereLight args={night ? ["#3a2e24", "#0c0a09", 0.4] : ["#fffaf2", "#d4c2a8", 0.78]} />
       <directionalLight
-        position={[-9.5, 3.6, depth / 2]}
-        intensity={night ? 0.18 : 1.15}
-        color={night ? "#8aa0c8" : "#fff1d4"}
+        position={[-6, 8.2, depth * 0.35]}
+        intensity={night ? 0.28 : 1.35}
+        color={night ? "#8aa0c8" : "#fff6e4"}
         castShadow={!night}
-        shadow-mapSize-width={2048}
-        shadow-mapSize-height={2048}
+        shadow-mapSize-width={diorama ? 1024 : 2048}
+        shadow-mapSize-height={diorama ? 1024 : 2048}
         shadow-bias={-0.00025}
         shadow-normalBias={0.035}
         shadow-camera-near={1}
@@ -682,8 +684,10 @@ function OfficeScene({
         shadow-camera-top={20}
         shadow-camera-bottom={-20}
       />
-      {!night && <directionalLight position={[6, 3.2, 8]} intensity={0.22} color="#ffd9a8" />}
-      <Hall width={width} depth={depth} night={night} />
+      {!night && <directionalLight position={[cx + 5, 5.4, depth + 4]} intensity={0.55} color="#fff6ea" />}
+      {!night && <directionalLight position={[6, 3.2, 8]} intensity={0.28} color="#ffd9a8" />}
+      <Hall width={width} depth={depth} night={night} cols={cols} count={agents.length} />
+      <PlantGear plant={plant || null} width={width} depth={depth} />
       <ShowroomWall
         pins={showroom}
         width={width}
@@ -739,10 +743,14 @@ function OfficeScene({
         blur={2.6}
         far={9}
       />
-      <FreeOrbit lookAt={[cx, 0.9, depth * 0.42]} minDistance={0.8} maxDistance={72} />
+      {orbit && (
+        <FreeOrbit lookAt={[cx, 0.9, depth * 0.42]} minDistance={0.55} maxDistance={110} walk />
+      )}
     </>
   );
 }
+
+export { OfficeScene };
 
 export function OfficeCanvas({
   agents,
@@ -751,6 +759,7 @@ export function OfficeCanvas({
   chains,
   showroom,
   night,
+  plant = null,
   onSelect,
   onPreview,
   className,
@@ -761,6 +770,7 @@ export function OfficeCanvas({
   chains: Record<string, Chain>;
   showroom: PinCard[];
   night: boolean;
+  plant?: PlantSnapshot | null;
   onSelect: (id: string) => void;
   onPreview: (jobId: string, file: Artifact) => void;
   className?: string;
@@ -821,6 +831,7 @@ export function OfficeCanvas({
               chains={chains}
               showroom={showroom}
               night={night}
+              plant={plant}
               onSelect={onSelect}
               onPreview={onPreview}
             />
