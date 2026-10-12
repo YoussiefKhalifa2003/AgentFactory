@@ -5,6 +5,8 @@ import { useFactory } from "@/lib/factory";
 import { Artifact, bayCopy, Job, portrait, strengthLabel, taskTitle } from "@/lib/types";
 import { clip, collapseRepeats, friendlyText, isNoise } from "@/lib/text";
 import { bestView, downloadSrc, fileKindLabel, filesForJob } from "@/lib/files";
+import { apiUrl } from "@/lib/config";
+import { parseVoiceCommand, resolveMeetingListId, speechAvailable, startListen } from "@/lib/voice";
 
 export function DeskScreen({
   onPreview,
@@ -17,6 +19,9 @@ export function DeskScreen({
   const job = state?.job || null;
   const [hand, setHand] = useState("");
   const [busy, setBusy] = useState(false);
+  const [eyes, setEyes] = useState<File[]>([]);
+  const [listening, setListening] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   if (!agent) {
     return (
@@ -28,12 +33,18 @@ export function DeskScreen({
 
   async function send(e: FormEvent) {
     e.preventDefault();
-    const text = hand.trim();
-    if (!text || !agent) return;
+    const text = hand.trim() || (eyes.length ? "Look at this" : "");
+    if ((!text && !eyes.length) || !agent) return;
     setBusy(true);
     try {
-      await assignWork({ agentId: agent.id, text, listId: "inbox" });
+      await assignWork({
+        agentId: agent.id,
+        text,
+        listId: "inbox",
+        files: eyes.length ? eyes : undefined,
+      });
       setHand("");
+      setEyes([]);
     } finally {
       setBusy(false);
     }
@@ -61,7 +72,13 @@ export function DeskScreen({
         <p className="shrink-0 line-clamp-3 px-4 pb-2 text-[13px] leading-5 text-[var(--ink-soft)]">{bayCopy(agent)}</p>
       ) : null}
 
-      <Thread job={job} liveTokens={state?.tokens || ""} liveThink={state?.think || ""} working={working} />
+      <Thread
+        job={job}
+        liveTokens={state?.tokens || ""}
+        liveThink={state?.think || ""}
+        working={working}
+        trace={state?.trace}
+      />
 
       {job && files.length > 0 && (
         <FileStrip job={job} files={files} onPreview={onPreview} />
@@ -77,16 +94,62 @@ export function DeskScreen({
         </button>
       )}
 
-      <form onSubmit={send} className="flex shrink-0 gap-2 px-3 py-2">
-        <input
-          value={hand}
-          onChange={(e) => setHand(e.target.value)}
-          placeholder={`Hand ${agent.name} a task`}
-          className="min-h-11 min-w-0 flex-1 rounded-full bg-white px-4 text-[16px]"
-        />
-        <button type="submit" className="btn btn-solid px-4" disabled={!hand.trim() || busy}>
-          Send
-        </button>
+      <form onSubmit={send} className="flex shrink-0 flex-col gap-2 px-3 py-2">
+        {eyes.length > 0 && (
+          <p className="truncate text-[12px] text-[var(--ink-soft)]">{eyes.map((f) => f.name).join(", ")}</p>
+        )}
+        <div className="flex gap-2">
+          <input
+            value={hand}
+            onChange={(e) => setHand(e.target.value)}
+            placeholder={`Hand ${agent.name} a task`}
+            className="min-h-11 min-w-0 flex-1 rounded-full bg-white px-4 text-[16px]"
+          />
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*,.pdf"
+            className="hidden"
+            onChange={(e) => {
+              const list = [...(e.target.files || [])];
+              if (list.length) setEyes(list.slice(0, 4));
+            }}
+          />
+          <button type="button" className="btn px-3" onClick={() => fileRef.current?.click()}>
+            Photo
+          </button>
+          {speechAvailable() && (
+            <button
+              type="button"
+              className={`btn px-3 ${listening ? "btn-solid" : ""}`}
+              onPointerDown={() => {
+                setListening(true);
+                startListen({
+                  onInterim: (t) => setHand(t),
+                  onFinal: (t) => {
+                    setHand(t);
+                    const intent = parseVoiceCommand(t, agents);
+                    if (intent.action === "cancel" && job) cancelJob(job.id);
+                    if (intent.action === "assign" && intent.text) {
+                      const target = intent.agentId || agent.id;
+                      resolveMeetingListId(apiUrl(), intent.meeting).then((listId) => {
+                        assignWork({ agentId: target, text: intent.text, listId }).catch(() => undefined);
+                      });
+                      setHand("");
+                    }
+                  },
+                  onEnd: () => setListening(false),
+                });
+              }}
+              onPointerUp={() => setListening(false)}
+            >
+              Mic
+            </button>
+          )}
+          <button type="submit" className="btn btn-solid px-4" disabled={(!hand.trim() && !eyes.length) || busy}>
+            Send
+          </button>
+        </div>
       </form>
     </div>
   );
@@ -97,11 +160,13 @@ function Thread({
   liveTokens,
   liveThink,
   working,
+  trace,
 }: {
   job: Job | null;
   liveTokens: string;
   liveThink: string;
   working: boolean;
+  trace?: { kind?: string; detail?: string; label?: string }[];
 }) {
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -131,6 +196,14 @@ function Thread({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
       <p className="text-[13px] font-medium">{taskTitle(job)}</p>
+      {(() => {
+        const ev = [...(trace || [])]
+          .reverse()
+          .find((e) => ["critic.passed", "critic.finding", "critic.skipped"].includes(e.kind || ""));
+        return ev ? (
+          <p className="mt-2 text-[13px] text-[var(--ink-soft)]">Verdict · {ev.detail || ev.label || ev.kind}</p>
+        ) : null;
+      })()}
       {live ? (
         <p className="mt-3 whitespace-pre-wrap text-[15px] leading-6 text-[var(--ink-soft)]">{clip(live, 2400)}</p>
       ) : null}

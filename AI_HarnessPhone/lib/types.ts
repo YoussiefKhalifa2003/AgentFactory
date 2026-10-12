@@ -137,11 +137,20 @@ export type ListItem = {
   virtual?: boolean;
 };
 
+export type TraceEvent = {
+  id?: number;
+  kind: string;
+  at?: string;
+  detail?: string;
+  label?: string;
+};
+
 export type LiveState = {
   job: Job | null;
   tokens: string;
   think: string;
   artifacts: Artifact[];
+  trace?: TraceEvent[];
 };
 
 export function pfpSrc(api: string, pfp: string | null | undefined): string | null {
@@ -178,7 +187,9 @@ export function bayCopy(agent: Agent) {
 }
 
 export function portrait(agent: Agent) {
-  if (agent.pfp) return pfpSrc(apiUrl(), agent.pfp);
+  if (agent.pfp) {
+    return pfpSrc(apiUrl(), agent.pfp) || lookSvg(parseLook(agent.look, agent.name, agent.pigment), agent.pigment);
+  }
   return lookSvg(parseLook(agent.look, agent.name, agent.pigment), agent.pigment);
 }
 

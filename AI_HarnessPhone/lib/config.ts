@@ -72,6 +72,8 @@ export function apiFetch(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers || {});
   const auth = authHeaders();
   for (const [k, v] of Object.entries(auth)) headers.set(k, v);
-  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (init.body && !headers.has("Content-Type") && !(typeof FormData !== "undefined" && init.body instanceof FormData)) {
+    headers.set("Content-Type", "application/json");
+  }
   return fetch(`${apiUrl()}${path}`, { ...init, headers });
 }

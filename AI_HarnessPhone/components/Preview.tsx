@@ -60,7 +60,14 @@ export function FilePreview({
         </a>
       </header>
       <div className="min-h-0 flex-1 overflow-auto">
-        {html && <iframe title={file.name} src={src} className="h-full min-h-[70dvh] w-full border-0 bg-white" />}
+        {html && (
+          <iframe
+            title={file.name}
+            src={src}
+            className="h-full min-h-[70dvh] w-full border-0 bg-white"
+            allow="fullscreen; gamepad; pointer-lock; autoplay"
+          />
+        )}
         {image && <img src={src} alt={file.name} className="mx-auto max-w-full" />}
         {pdf && <iframe title={file.name} src={src} className="h-full min-h-[70dvh] w-full border-0 bg-white" />}
         {audio && (

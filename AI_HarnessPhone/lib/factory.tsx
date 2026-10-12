@@ -25,7 +25,9 @@ import {
   LiveState,
   PlantSnapshot,
   ShiftNote,
+  TraceEvent,
 } from "./types";
+import { speak } from "./voice";
 
 type Tab = "lists" | "floor" | "desk";
 
@@ -35,6 +37,7 @@ type AssignArgs = {
   text?: string;
   listId?: string;
   foreman?: boolean;
+  files?: File[];
   chain?: { agent_id?: string; strength: string }[];
 };
 
@@ -66,7 +69,7 @@ type FactoryValue = {
 const Ctx = createContext<FactoryValue | null>(null);
 
 function emptyLive(): LiveState {
-  return { job: null, tokens: "", think: "", artifacts: [] };
+  return { job: null, tokens: "", think: "", artifacts: [], trace: [] };
 }
 
 export function FactoryProvider({ children }: { children: React.ReactNode }) {
@@ -278,6 +281,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
               )
             );
             setTaskTick((n) => n + 1);
+            if (status === "done") {
+              const out = String(msg.output || "");
+              const prompt = String(msg.prompt || "");
+              if (out && out !== "Done" && !/you are the critic/i.test(prompt)) speak(out);
+            }
           }
           if (msg.type === "job.artifact" && msg.artifact && msg.jobId) {
             const art = msg.artifact as Artifact;
@@ -317,6 +325,13 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
                 )
               );
             }
+          } else if (msg.type === "job.trace" && msg.jobId) {
+            const events = (msg.events || []) as TraceEvent[];
+            const agentId = String(msg.agentId || "");
+            setLive((prev) => {
+              const cur = prev[agentId] || emptyLive();
+              return { ...prev, [agentId]: { ...cur, trace: events } };
+            });
           } else if (msg.type === "plant" && msg.plant && typeof msg.plant === "object") {
             setPlant(msg.plant as PlantSnapshot);
           } else if (msg.type === "chain.updated" && msg.chain) {
@@ -421,17 +436,30 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       setSelectedId(args.agentId);
       setTab("desk");
     }
-    const r = await apiFetch("/api/assign", {
-      method: "POST",
-      body: JSON.stringify({
-        item_id: args.itemId || null,
-        agent_id: args.agentId || null,
-        text: args.text || null,
-        list_id: args.listId || null,
-        foreman: args.foreman || false,
-        chain: args.chain || null,
-      }),
-    });
+    let r: Response;
+    if (args.files && args.files.length) {
+      const form = new FormData();
+      if (args.itemId) form.append("item_id", args.itemId);
+      if (args.agentId) form.append("agent_id", args.agentId);
+      if (args.text) form.append("text", args.text);
+      if (args.listId) form.append("list_id", args.listId);
+      if (args.foreman) form.append("foreman", "true");
+      if (args.chain) form.append("chain", JSON.stringify(args.chain));
+      for (const file of args.files) form.append("files", file);
+      r = await apiFetch("/api/assign", { method: "POST", body: form });
+    } else {
+      r = await apiFetch("/api/assign", {
+        method: "POST",
+        body: JSON.stringify({
+          item_id: args.itemId || null,
+          agent_id: args.agentId || null,
+          text: args.text || null,
+          list_id: args.listId || null,
+          foreman: args.foreman || false,
+          chain: args.chain || null,
+        }),
+      });
+    }
     if (!r.ok) throw new Error((await r.text()) || "Could not assign");
     const data = await r.json();
     const nextAgent =
