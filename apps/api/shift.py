@@ -104,6 +104,14 @@ def compose_note(shift: dict[str, Any] | None = None) -> str:
     ]
     if overflow:
         lines.append("Plant overflow: " + "; ".join(overflow) + ".")
+    try:
+        import coach
+
+        extra = coach.morning_line()
+        if extra:
+            lines.append(extra)
+    except Exception:
+        pass
     if pin_names:
         lines.append("Pins: " + ", ".join(pin_names[:8]) + ".")
     if not done and not blocked and not pin_names:
@@ -136,12 +144,25 @@ def _local_35(agent: dict[str, Any]) -> bool:
 
 async def _run(shift_id: str, cap: int, broadcast: Broadcast | None) -> None:
     started = 0
+    coached = False
     try:
         while True:
             current = db.get_shift(shift_id) if hasattr(db, "get_shift") else db.open_shift()
             if not current or current.get("ended_at"):
                 return
             if started >= cap:
+                in_flight = db.in_flight_jobs()
+                if not in_flight and not coached:
+                    try:
+                        import coach
+
+                        await coach.run_shift(current, broadcast)
+                    except Exception:
+                        pass
+                    coached = True
+                    note = compose_note(db.open_shift() or current)
+                    db.update_shift(shift_id, note=note)
+                    _broadcast(broadcast, {**(db.open_shift() or current), "note": note})
                 await asyncio.sleep(2)
                 continue
             launched: list[dict[str, Any]] = []
@@ -177,6 +198,14 @@ async def _run(shift_id: str, cap: int, broadcast: Broadcast | None) -> None:
                 _broadcast(broadcast, {**row, "note": note})
             in_flight = db.in_flight_jobs()
             if not fresh and not in_flight:
+                if not coached:
+                    try:
+                        import coach
+
+                        await coach.run_shift(db.open_shift() or current, broadcast)
+                    except Exception:
+                        pass
+                    coached = True
                 note = compose_note(db.open_shift() or current)
                 db.update_shift(shift_id, note=note)
                 return
