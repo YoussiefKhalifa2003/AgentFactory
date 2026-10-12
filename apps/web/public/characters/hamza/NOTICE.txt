@@ -1,0 +1,3 @@
+Hamza office figure: local simplified OBJ (fairer skin, lighter beard).
+Keep vexel-simplified.obj, vexel-simplified.mtl, and textures/ together.
+Import in Blender with Forward Y and Up Z. No animation rig.
