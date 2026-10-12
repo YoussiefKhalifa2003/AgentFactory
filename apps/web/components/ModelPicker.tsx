@@ -1,35 +1,41 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { API_URL, ModelOption } from "@/lib/types";
+import { ModelOption } from "@/lib/types";
+import {
+  getModelCatalog,
+  subscribeModels,
+  warmupModels,
+  withCurrentModel,
+} from "@/lib/models";
 
 const GROUPS: { id: string; label: string }[] = [
-  { id: "local", label: "This machine" },
   { id: "spark", label: "Spark" },
+  { id: "local", label: "This machine" },
   { id: "openrouter", label: "OpenRouter" },
   { id: "zen", label: "OpenCode Zen" },
 ];
 
+function optionLabel(m: ModelOption) {
+  const where =
+    m.provider === "spark" ? " · Spark" : m.provider === "local" ? " · this GPU" : "";
+  return `${m.name}${where}${m.available ? "" : " · not running"}`;
+}
+
 export function useModelCatalog() {
-  const [catalog, setCatalog] = useState<ModelOption[]>([]);
-  const [defaultId, setDefaultId] = useState("big-pickle");
-  const [failed, setFailed] = useState(false);
+  const [catalog, setCatalog] = useState<ModelOption[]>(() => getModelCatalog().catalog);
+  const [defaultId, setDefaultId] = useState(() => getModelCatalog().defaultId);
 
   useEffect(() => {
-    fetch(`${API_URL}/api/models`)
-      .then((r) => {
-        if (!r.ok) throw new Error("models");
-        return r.json();
-      })
-      .then((data) => {
-        setCatalog(Array.isArray(data.catalog) ? data.catalog : []);
-        if (data.default) setDefaultId(data.default);
-        setFailed(false);
-      })
-      .catch(() => setFailed(true));
+    const unsub = subscribeModels((next) => {
+      setCatalog(next.catalog);
+      setDefaultId(next.defaultId);
+    });
+    warmupModels();
+    return unsub;
   }, []);
 
-  return { catalog, defaultId, failed };
+  return { catalog, defaultId };
 }
 
 export function ModelPicker({
@@ -41,8 +47,9 @@ export function ModelPicker({
   onChange: (id: string) => void;
   compact?: boolean;
 }) {
-  const { catalog, defaultId, failed } = useModelCatalog();
+  const { catalog, defaultId } = useModelCatalog();
   const selected = value || defaultId;
+  const rows = useMemo(() => withCurrentModel(catalog, selected), [catalog, selected]);
 
   useEffect(() => {
     if (compact) return;
@@ -52,15 +59,11 @@ export function ModelPicker({
   const grouped = useMemo(() => {
     return GROUPS.map((group) => ({
       ...group,
-      models: catalog.filter((m) => m.provider === group.id),
+      models: rows.filter((m) => m.provider === group.id),
     })).filter((g) => g.models.length > 0);
-  }, [catalog]);
+  }, [rows]);
 
-  if (failed) {
-    return <p className="text-sm text-[#b42318]">Couldn’t load models.</p>;
-  }
-
-  if (catalog.length === 0) {
+  if (rows.length === 0) {
     return (
       <p className="text-sm text-[var(--ink-soft)]">Loading available desks…</p>
     );
@@ -79,8 +82,7 @@ export function ModelPicker({
             <optgroup key={group.id} label={group.label}>
               {group.models.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.name}
-                  {m.available ? "" : " · not running"}
+                  {optionLabel(m)}
                 </option>
               ))}
             </optgroup>

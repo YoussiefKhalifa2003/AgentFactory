@@ -153,6 +153,86 @@ _gpu_lock = asyncio.Lock()
 # factory keeps one live generation per box and sends the next desk elsewhere.
 _spark_box_use: dict[str, int] = {}
 _spark_box_lock = asyncio.Lock()
+_local_lock = asyncio.Lock()
+_openrouter_lock = asyncio.Lock()
+_spark_lock = asyncio.Lock()
+_bg_tasks: set[asyncio.Task] = set()
+_aborted: set[str] = set()
+_stream_clients: dict[str, list[httpx.AsyncClient]] = {}
+_local_backend: dict[str, str] = {}
+
+
+def job_aborted(job_id: str) -> bool:
+    return bool(job_id) and job_id in _aborted
+
+
+def clear_abort(job_id: str) -> None:
+    if not job_id:
+        return
+    _aborted.discard(job_id)
+    _stream_clients.pop(job_id, None)
+    _local_backend.pop(job_id, None)
+
+
+def _raise_if_aborted(job_id: str) -> None:
+    if job_aborted(job_id):
+        raise asyncio.CancelledError
+
+
+def _track_client(job_id: str, client: httpx.AsyncClient) -> None:
+    if not job_id:
+        return
+    _stream_clients.setdefault(job_id, []).append(client)
+
+
+def _untrack_client(job_id: str, client: httpx.AsyncClient) -> None:
+    if not job_id:
+        return
+    bucket = _stream_clients.get(job_id) or []
+    if client in bucket:
+        bucket.remove(client)
+    if not bucket:
+        _stream_clients.pop(job_id, None)
+
+
+async def _ollama_stop(backend: str) -> None:
+    """Drop the in-flight Ollama runner so VRAM and compute actually go idle."""
+    name = (backend or "").strip()
+    if not name:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.post(
+                f"{OLLAMA_BASE}/api/generate",
+                json={"model": name, "prompt": "", "keep_alive": 0, "stream": False},
+            )
+    except Exception:
+        pass
+
+
+async def abort_in_flight(job_id: str, backend: str = "") -> None:
+    """Close the live HTTP stream and unload the local model. Stop must kill GPU work."""
+    if not job_id:
+        return
+    _aborted.add(job_id)
+    name = backend or _local_backend.get(job_id) or ""
+    clients = list(_stream_clients.get(job_id) or [])
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+    if name:
+        await _ollama_stop(name)
+
+
+def _spawn(coro: Any) -> None:
+    try:
+        task = asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        return
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 def _entry(row: dict[str, str], available: bool) -> dict[str, Any]:
@@ -221,19 +301,123 @@ async def claim_spark_box() -> str | None:
         return None
 
 
+def spark_busy() -> bool:
+    return any(n > 0 for n in _spark_box_use.values())
+
+
 async def release_spark_box(box: str) -> None:
     async with _spark_box_lock:
         _spark_box_use[box] = max(0, _spark_box_use.get(box, 0) - 1)
 
 
+def is_vision_model(model_id: str) -> bool:
+    low = (model_id or "").lower()
+    return any(token in low for token in ("-vl", "vl:", "vision", "gpt-4o", "gemini"))
+
+
+def model_accepts_images(model_id: str) -> bool:
+    """Name says VL *and* that backend is actually on the box we would call."""
+    if not is_vision_model(model_id):
+        return False
+    provider, backend = parse_model(model_id)
+    if provider == "spark":
+        return backend in _spark_models
+    if provider == "local":
+        return not _ollama_models or backend in _ollama_models
+    return True
+
+
+def pick_vision_model(agent: dict[str, Any] | None = None) -> str | None:
+    current = str((agent or {}).get("model") or "")
+    if model_accepts_images(current):
+        return current
+    spark_desk = current.startswith("spark:")
+    spark_cands = ["spark:qwen3-vl:32b", "spark:qwen3-vl:8b"]
+    local_cands = ["local:qwen3-vl:8b"]
+    candidates = spark_cands + local_cands if spark_desk else local_cands + spark_cands
+    backends = _ollama_models
+    for mid in candidates:
+        _provider, backend = parse_model(mid)
+        if mid.startswith("local:") and backends and backend not in backends:
+            continue
+        if mid.startswith("spark:"):
+            if not spark_enabled():
+                continue
+            if backend not in _spark_models:
+                continue
+        if spark_desk and mid.startswith("local:"):
+            return None
+        return mid
+    return None
+
+
+def user_with_images(text: str, ws: Any, rels: list[str]) -> dict[str, Any]:
+    import eyes as vision
+
+    packed = vision.encode_many(ws, rels)
+    if not packed:
+        return {"role": "user", "content": text}
+    images = [b64 for _rel, b64, _mime in packed]
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for _rel, b64, mime in packed:
+        parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    return {"role": "user", "content": parts, "images": images}
+
+
+def messages_have_images(messages: list[dict[str, Any]]) -> bool:
+    for m in messages:
+        if m.get("images"):
+            return True
+        content = m.get("content")
+        if isinstance(content, list) and any(
+            isinstance(p, dict) and p.get("type") == "image_url" for p in content
+        ):
+            return True
+    return False
+
+
+def text_only_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop image_url / images so a text model never sees a multimodal body."""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        item = {k: v for k, v in m.items() if k != "images"}
+        content = item.get("content")
+        if isinstance(content, list):
+            texts = [
+                str(p.get("text") or "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            note = "\n".join(t for t in texts if t).strip()
+            item["content"] = note or "[image omitted — this model has no vision]"
+        out.append(item)
+    return out
+
+
+def is_multimodal_reject(message: str) -> bool:
+    low = (message or "").lower()
+    return "multimodal" in low and "not support" in low
+
+
+def _openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        item = {k: v for k, v in m.items() if k not in {"images"}}
+        out.append(item)
+    return out
+
+
 def default_model_id() -> str:
-    if openrouter_enabled():
-        return OPENROUTER_PINNED[0]["id"]
+    """First available local model, else Spark, else OpenRouter, else Zen."""
     if _ollama_models:
         for row in LOCAL_PINNED:
             if row["backend"] in _ollama_models:
                 return row["id"]
         return f"local:{next(iter(_ollama_models))}"
+    if spark_enabled():
+        return SPARK_PINNED[0]["id"]
+    if openrouter_enabled():
+        return OPENROUTER_PINNED[0]["id"]
     return "big-pickle"
 
 
@@ -279,45 +463,65 @@ def _openrouter_headers() -> dict[str, str]:
     }
 
 
+def _read_json(r: httpx.Response) -> Any:
+    try:
+        return r.json()
+    except Exception:
+        return None
+
+
+def _json_rows(payload: Any, key: str) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        rows = payload.get(key)
+        return rows if isinstance(rows, list) else []
+    return []
+
+
 async def refresh_local() -> set[str]:
     global _ollama_models, _ollama_until
-    now = time.monotonic()
-    if _ollama_until > now:
-        return _ollama_models
-    found: set[str] = set()
-    try:
-        async with httpx.AsyncClient(timeout=1.2) as client:
-            r = await client.get(f"{OLLAMA_BASE}/api/tags")
-            if r.status_code < 400:
-                for item in r.json().get("models") or []:
-                    name = item.get("name") or ""
-                    if name:
-                        found.add(name)
-                        found.add(name.split(":")[0])
-    except httpx.HTTPError:
-        found = set()
-    _ollama_models = found
-    _ollama_until = now + (20 if found else 8)
-    return found
+    async with _local_lock:
+        now = time.monotonic()
+        if _ollama_until > now:
+            return _ollama_models
+        found: set[str] = set()
+        try:
+            async with httpx.AsyncClient(timeout=1.2) as client:
+                r = await client.get(f"{OLLAMA_BASE}/api/tags")
+                if r.status_code < 400:
+                    for item in _json_rows(_read_json(r), "models"):
+                        if not isinstance(item, dict):
+                            continue
+                        name = item.get("name") or ""
+                        if name:
+                            found.add(name)
+                            found.add(name.split(":")[0])
+        except Exception:
+            found = set()
+        _ollama_models = found
+        _ollama_until = now + (20 if found else 8)
+        return found
 
 
 async def refresh_openrouter() -> bool:
     global _openrouter_until, _openrouter_ok
-    now = time.monotonic()
-    if not OPENROUTER_KEY:
-        _openrouter_ok = False
-        return False
-    if _openrouter_until > now:
-        return _openrouter_ok
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get(f"{OPENROUTER_BASE}/models", headers=_openrouter_headers())
-            ok = r.status_code < 400
-    except httpx.HTTPError:
-        ok = False
-    _openrouter_ok = ok
-    _openrouter_until = now + (60 if ok else 12)
-    return ok
+    async with _openrouter_lock:
+        now = time.monotonic()
+        if not OPENROUTER_KEY:
+            _openrouter_ok = False
+            return False
+        if _openrouter_until > now:
+            return _openrouter_ok
+        try:
+            async with httpx.AsyncClient(timeout=2.5) as client:
+                r = await client.get(f"{OPENROUTER_BASE}/models", headers=_openrouter_headers())
+                ok = r.status_code < 400
+        except Exception:
+            ok = False
+        _openrouter_ok = ok
+        _openrouter_until = now + (60 if ok else 30)
+        return ok
 
 
 def _spark_chat_name(name: str) -> bool:
@@ -329,38 +533,51 @@ def _spark_chat_name(name: str) -> bool:
 
 async def refresh_spark() -> set[str]:
     global _spark_models, _spark_until, _spark_ok
-    now = time.monotonic()
-    if _spark_until > now:
+    async with _spark_lock:
+        now = time.monotonic()
+        if _spark_until > now:
+            return _spark_models
+        if spark_busy():
+            # Listing models while a generation is in flight stalls LiteLLM / Ollama.
+            _spark_until = now + 30
+            return _spark_models
+        found: set[str] = set()
+        ok = False
+        if SPARK_KEY:
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    r = await client.get(
+                        f"{_spark_v1()}/models",
+                        headers={"Authorization": f"Bearer {SPARK_KEY}"},
+                    )
+                    if r.status_code < 400:
+                        ok = True
+                        for item in _json_rows(_read_json(r), "data"):
+                            raw = item.get("id") if isinstance(item, dict) else item
+                            mid = str(raw or "").strip()
+                            if mid:
+                                found.add(mid)
+            except Exception:
+                ok = False
+        else:
+            origin = _spark_v1()[:-3] if _spark_v1().endswith("/v1") else _spark_v1()
+            try:
+                async with httpx.AsyncClient(timeout=1.5) as client:
+                    r = await client.get(f"{origin}/health/liveliness")
+                    ok = r.status_code < 400
+            except Exception:
+                ok = False
+        if ok:
+            _spark_ok = True
+            if found:
+                _spark_models = found
+            _spark_until = now + 60
+        else:
+            # Keep the last good list. A busy/timeout probe is not "Spark died."
+            _spark_until = now + 60
+            if not _spark_models:
+                _spark_ok = False
         return _spark_models
-    found: set[str] = set()
-    ok = False
-    if SPARK_KEY:
-        try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
-                r = await client.get(
-                    f"{_spark_v1()}/models",
-                    headers={"Authorization": f"Bearer {SPARK_KEY}"},
-                )
-                if r.status_code < 400:
-                    ok = True
-                    for item in r.json().get("data") or []:
-                        mid = str(item.get("id") or "").strip()
-                        if mid:
-                            found.add(mid)
-        except httpx.HTTPError:
-            ok = False
-    else:
-        origin = _spark_v1()[:-3] if _spark_v1().endswith("/v1") else _spark_v1()
-        try:
-            async with httpx.AsyncClient(timeout=1.5) as client:
-                r = await client.get(f"{origin}/health/liveliness")
-                ok = r.status_code < 400
-        except httpx.HTTPError:
-            ok = False
-    _spark_ok = ok
-    _spark_models = found
-    _spark_until = now + (20 if found else 8)
-    return found
 
 
 async def refresh_spark2() -> bool:
@@ -385,7 +602,7 @@ async def refresh_spark2() -> bool:
                     reason = "key rejected"
                 elif not ok:
                     reason = "unreachable"
-        except httpx.HTTPError:
+        except Exception:
             ok = False
             reason = "unreachable"
     _spark2_ok = ok
@@ -405,7 +622,7 @@ async def openai_chat(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
-    timeout: float = 90,
+    timeout: float = 180,
     extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     url = base_url.rstrip("/")
@@ -419,9 +636,9 @@ async def openai_chat(
         headers.update(extra_headers)
     payload: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": _openai_messages(messages),
         "temperature": 0.3,
-        "max_tokens": 8192,
+        "max_tokens": 65536,
     }
     if tools:
         payload["tools"] = tools
@@ -624,6 +841,31 @@ def looks_cut_off(text: str) -> bool:
     return last.isalnum()
 
 
+def context_limited(err: zen.ZenError) -> bool:
+    msg = (err.message or "").lower()
+    if err.status not in {400, 413, 422}:
+        return False
+    needles = (
+        "max_tokens",
+        "max tokens",
+        "max_completion_tokens",
+        "context length",
+        "context window",
+        "too many tokens",
+        "maximum context",
+        "reduce the length",
+        "token limit",
+        "this model's maximum",
+        "n_ctx",
+        "num_ctx",
+    )
+    if any(token in msg for token in needles):
+        return True
+    return "token" in msg and any(
+        word in msg for word in ("context", "window", "limit", "too long", "too large")
+    )
+
+
 class _StreamGate:
     """Dedup snapshots, keep thinking off the answer channel."""
 
@@ -763,6 +1005,51 @@ def _delta_text(delta: dict[str, Any]) -> tuple[str, str]:
     return str(content), str(reason)
 
 
+async def _openai_with_token_ladder(
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None,
+    timeout: float,
+    token_steps: tuple[int, ...],
+    extra_headers: dict[str, str] | None = None,
+    extra_payload: dict[str, Any] | None = None,
+    on_token: TokenCb | None = None,
+    on_think: TokenCb | None = None,
+    job_id: str = "",
+) -> dict[str, Any]:
+    last: zen.ZenError | None = None
+    for i, tokens in enumerate(token_steps):
+        _raise_if_aborted(job_id)
+        try:
+            return await openai_chat_stream(
+                base_url,
+                api_key,
+                model,
+                messages,
+                tools=tools,
+                timeout=timeout,
+                extra_headers=extra_headers,
+                extra_payload=extra_payload,
+                on_token=on_token,
+                on_think=on_think,
+                max_tokens=tokens,
+                job_id=job_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except zen.ZenError as err:
+            if job_aborted(job_id):
+                raise asyncio.CancelledError from err
+            last = err
+            if i < len(token_steps) - 1 and context_limited(err):
+                continue
+            raise
+    raise last or zen.ZenError(502, f"{model} returned no response")
+
+
 async def openai_chat_stream(
     base_url: str,
     api_key: str,
@@ -773,8 +1060,9 @@ async def openai_chat_stream(
     extra_headers: dict[str, str] | None = None,
     on_token: TokenCb | None = None,
     on_think: TokenCb | None = None,
-    max_tokens: int = 8192,
+    max_tokens: int = 65536,
     extra_payload: dict[str, Any] | None = None,
+    job_id: str = "",
 ) -> dict[str, Any]:
     url = base_url.rstrip("/")
     if not url.endswith("/v1"):
@@ -787,7 +1075,7 @@ async def openai_chat_stream(
         headers.update(extra_headers)
     payload: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": _openai_messages(messages),
         "temperature": 0.3,
         "max_tokens": max_tokens,
         "stream": True,
@@ -799,64 +1087,80 @@ async def openai_chat_stream(
         payload["tool_choice"] = "auto"
     last: zen.ZenError | None = None
     timeout_cfg = httpx.Timeout(timeout, connect=12.0, read=timeout, write=30.0)
-    async with httpx.AsyncClient(timeout=timeout_cfg) as client:
-        for use_tools in (True, False) if tools else (False,):
-            body = (
-                payload
-                if use_tools
-                else {k: v for k, v in payload.items() if k not in {"tools", "tool_choice"}}
-            )
-            sink = _StreamGate(on_token, on_think)
-            tool_acc: dict[int, dict[str, Any]] = {}
-            files = _WriteFileStream(on_token)
-            try:
-                async with client.stream(
-                    "POST",
-                    f"{url}/chat/completions",
-                    headers={**headers, "Accept": "text/event-stream"},
-                    json=body,
-                ) as r:
-                    if r.status_code >= 400:
-                        err_body = (await r.aread()).decode("utf-8", "replace")
-                        err = zen.ZenError(r.status_code, zen._friendly(r.status_code, err_body))
-                        last = err
-                        if use_tools and r.status_code in {400, 404, 422}:
-                            continue
-                        raise err
-                    async for line in r.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith(":"):
-                            continue
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
-                        choice = (chunk.get("choices") or [{}])[0]
-                        delta = choice.get("delta") or {}
-                        piece, reason = _delta_text(delta)
-                        if reason:
-                            sink.push_reason(reason)
-                        if piece:
-                            sink.push_content(piece)
-                        if delta.get("tool_calls"):
-                            _merge_tool_delta(tool_acc, delta["tool_calls"])
-                            files.feed(delta["tool_calls"])
-                        if choice.get("finish_reason"):
-                            break
-                        await asyncio.sleep(0)
-            except httpx.TimeoutException:
-                last = zen.ZenError(504, f"{model} timed out")
-                continue
-            except httpx.HTTPError as e:
-                raise zen.ZenError(503, f"{model} unreachable") from e
-            return _packed_from_gate(sink, tool_acc)
+    _raise_if_aborted(job_id)
+    client = httpx.AsyncClient(timeout=timeout_cfg)
+    _track_client(job_id, client)
+    try:
+        async with client:
+            for use_tools in (True, False) if tools else (False,):
+                _raise_if_aborted(job_id)
+                body = (
+                    payload
+                    if use_tools
+                    else {k: v for k, v in payload.items() if k not in {"tools", "tool_choice"}}
+                )
+                sink = _StreamGate(on_token, on_think)
+                tool_acc: dict[int, dict[str, Any]] = {}
+                files = _WriteFileStream(on_token)
+                try:
+                    async with client.stream(
+                        "POST",
+                        f"{url}/chat/completions",
+                        headers={**headers, "Accept": "text/event-stream"},
+                        json=body,
+                    ) as r:
+                        if r.status_code >= 400:
+                            err_body = (await r.aread()).decode("utf-8", "replace")
+                            err = zen.ZenError(r.status_code, zen._friendly(r.status_code, err_body))
+                            last = err
+                            if use_tools and r.status_code in {400, 404, 422}:
+                                continue
+                            raise err
+                        async for line in r.aiter_lines():
+                            _raise_if_aborted(job_id)
+                            if not line:
+                                continue
+                            if line.startswith(":"):
+                                continue
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            choice = (chunk.get("choices") or [{}])[0]
+                            delta = choice.get("delta") or {}
+                            piece, reason = _delta_text(delta)
+                            if reason:
+                                sink.push_reason(reason)
+                            if piece:
+                                sink.push_content(piece)
+                            if delta.get("tool_calls"):
+                                _merge_tool_delta(tool_acc, delta["tool_calls"])
+                                files.feed(delta["tool_calls"])
+                            if choice.get("finish_reason"):
+                                break
+                            await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    raise
+                except httpx.TimeoutException:
+                    if job_aborted(job_id):
+                        raise asyncio.CancelledError
+                    last = zen.ZenError(504, f"{model} timed out")
+                    continue
+                except httpx.HTTPError as e:
+                    if job_aborted(job_id):
+                        raise asyncio.CancelledError from e
+                    raise zen.ZenError(503, f"{model} unreachable") from e
+                return _packed_from_gate(sink, tool_acc)
+    finally:
+        _untrack_client(job_id, client)
     if last:
+        if job_aborted(job_id):
+            raise asyncio.CancelledError
         raise last
     return await openai_chat(
         base_url,
@@ -886,10 +1190,20 @@ def _ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for m in messages:
         role = m.get("role") or "user"
+        content = m.get("content")
+        text = content
+        if isinstance(content, list):
+            text = " ".join(
+                str(p.get("text") or "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
         item: dict[str, Any] = {
             "role": "tool" if role == "tool" else role,
-            "content": m.get("content") or "",
+            "content": text or "",
         }
+        if m.get("images"):
+            item["images"] = m["images"]
         if m.get("tool_calls"):
             calls: list[dict[str, Any]] = []
             for call in m["tool_calls"]:
@@ -924,6 +1238,7 @@ async def ollama_chat_stream(
     on_token: TokenCb | None = None,
     on_think: TokenCb | None = None,
     timeout: float = 300,
+    job_id: str = "",
 ) -> dict[str, Any]:
     timeout_cfg = httpx.Timeout(timeout, connect=12.0, read=timeout, write=30.0)
     payload: dict[str, Any] = {
@@ -931,68 +1246,84 @@ async def ollama_chat_stream(
         "messages": _ollama_messages(messages),
         "stream": True,
         "think": False,
-        "options": {"temperature": 0.3, "num_predict": 8192},
+        "options": {"temperature": 0.3, "num_predict": 32768, "num_ctx": 32768},
     }
     if tools:
         payload["tools"] = tools
     last: zen.ZenError | None = None
-    async with httpx.AsyncClient(timeout=timeout_cfg) as client:
-        for use_tools in (True, False) if tools else (False,):
-            body = payload if use_tools else {k: v for k, v in payload.items() if k != "tools"}
-            sink = _StreamGate(on_token, on_think)
-            tool_acc: dict[int, dict[str, Any]] = {}
-            files = _WriteFileStream(on_token)
-            try:
-                async with client.stream(
-                    "POST", f"{OLLAMA_BASE}/api/chat", json=body
-                ) as r:
-                    if r.status_code >= 400:
-                        err_body = (await r.aread()).decode("utf-8", "replace")
-                        if "think" in body and r.status_code in {400, 422}:
-                            body = {k: v for k, v in body.items() if k != "think"}
-                            last = zen.ZenError(r.status_code, zen._friendly(r.status_code, err_body))
-                            continue
-                        err = zen.ZenError(r.status_code, zen._friendly(r.status_code, err_body))
-                        last = err
-                        if use_tools and r.status_code in {400, 404, 422}:
-                            continue
-                        raise err
-                    async for line in r.aiter_lines():
-                        if not line:
-                            continue
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if chunk.get("error"):
-                            err = str(chunk["error"])
-                            if use_tools and is_tool_json_error(err):
-                                last = zen.ZenError(502, err[:400])
-                                tool_acc.clear()
-                                break
-                            raise zen.ZenError(502, err[:400])
-                        msg = chunk.get("message") or {}
-                        piece = msg.get("content") or ""
-                        reason = msg.get("thinking") or msg.get("reasoning") or ""
-                        if reason:
-                            sink.push_reason(reason)
-                        if piece:
-                            sink.push_content(piece)
-                        if msg.get("tool_calls"):
-                            for i, call in enumerate(msg["tool_calls"]):
-                                packed = {**call, "index": i}
-                                _merge_tool_delta(tool_acc, [packed])
-                                files.feed([packed])
-                        await asyncio.sleep(0)
-            except httpx.TimeoutException:
-                last = zen.ZenError(504, f"{backend} timed out")
-                continue
-            except httpx.HTTPError as e:
-                raise zen.ZenError(503, f"{backend} unreachable") from e
-            if last and use_tools and is_tool_json_error(last.message):
-                continue
-            return _packed_from_gate(sink, tool_acc)
+    _raise_if_aborted(job_id)
+    client = httpx.AsyncClient(timeout=timeout_cfg)
+    _track_client(job_id, client)
+    try:
+        async with client:
+            for use_tools in (True, False) if tools else (False,):
+                _raise_if_aborted(job_id)
+                body = payload if use_tools else {k: v for k, v in payload.items() if k != "tools"}
+                sink = _StreamGate(on_token, on_think)
+                tool_acc: dict[int, dict[str, Any]] = {}
+                files = _WriteFileStream(on_token)
+                try:
+                    async with client.stream(
+                        "POST", f"{OLLAMA_BASE}/api/chat", json=body
+                    ) as r:
+                        if r.status_code >= 400:
+                            err_body = (await r.aread()).decode("utf-8", "replace")
+                            if "think" in body and r.status_code in {400, 422}:
+                                body = {k: v for k, v in body.items() if k != "think"}
+                                last = zen.ZenError(r.status_code, zen._friendly(r.status_code, err_body))
+                                continue
+                            err = zen.ZenError(r.status_code, zen._friendly(r.status_code, err_body))
+                            last = err
+                            if use_tools and r.status_code in {400, 404, 422}:
+                                continue
+                            raise err
+                        async for line in r.aiter_lines():
+                            _raise_if_aborted(job_id)
+                            if not line:
+                                continue
+                            try:
+                                chunk = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if chunk.get("error"):
+                                err = str(chunk["error"])
+                                if use_tools and is_tool_json_error(err):
+                                    last = zen.ZenError(502, err[:400])
+                                    tool_acc.clear()
+                                    break
+                                raise zen.ZenError(502, err[:400])
+                            msg = chunk.get("message") or {}
+                            piece = msg.get("content") or ""
+                            reason = msg.get("thinking") or msg.get("reasoning") or ""
+                            if reason:
+                                sink.push_reason(reason)
+                            if piece:
+                                sink.push_content(piece)
+                            if msg.get("tool_calls"):
+                                for i, call in enumerate(msg["tool_calls"]):
+                                    packed = {**call, "index": i}
+                                    _merge_tool_delta(tool_acc, [packed])
+                                    files.feed([packed])
+                            await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    raise
+                except httpx.TimeoutException:
+                    if job_aborted(job_id):
+                        raise asyncio.CancelledError
+                    last = zen.ZenError(504, f"{backend} timed out")
+                    continue
+                except httpx.HTTPError as e:
+                    if job_aborted(job_id):
+                        raise asyncio.CancelledError from e
+                    raise zen.ZenError(503, f"{backend} unreachable") from e
+                if last and use_tools and is_tool_json_error(last.message):
+                    continue
+                return _packed_from_gate(sink, tool_acc)
+    finally:
+        _untrack_client(job_id, client)
     if last:
+        if job_aborted(job_id):
+            raise asyncio.CancelledError
         raise last
     return await openai_chat_stream(
         f"{OLLAMA_BASE}/v1",
@@ -1003,6 +1334,7 @@ async def ollama_chat_stream(
         timeout=timeout,
         on_token=on_token,
         on_think=on_think,
+        job_id=job_id,
     )
 
 
@@ -1019,65 +1351,91 @@ async def chat(
     on_token: TokenCb | None = None,
     on_think: TokenCb | None = None,
     spark_base: str | None = None,
+    job_id: str = "",
 ) -> dict[str, Any]:
     provider, backend = parse_model(model_id)
-    if provider == "openrouter":
-        if not OPENROUTER_KEY:
-            raise zen.ZenError(401, "OPENROUTER_API_KEY is missing")
-        extra = {
-            "HTTP-Referer": "http://127.0.0.1:3000",
-            "X-Title": "Personal Factory",
-        }
-        return await openai_chat_stream(
-            OPENROUTER_BASE,
-            OPENROUTER_KEY,
+    payload = messages
+    if messages_have_images(payload) and not model_accepts_images(model_id):
+        payload = text_only_messages(payload)
+
+    async def send(msgs: list[dict[str, Any]]) -> dict[str, Any]:
+        _raise_if_aborted(job_id)
+        if provider == "openrouter":
+            if not OPENROUTER_KEY:
+                raise zen.ZenError(401, "OPENROUTER_API_KEY is missing")
+            extra = {
+                "HTTP-Referer": "http://127.0.0.1:3000",
+                "X-Title": "Personal Factory",
+            }
+            return await _openai_with_token_ladder(
+                OPENROUTER_BASE,
+                OPENROUTER_KEY,
+                backend,
+                msgs,
+                tools=tools,
+                timeout=300,
+                token_steps=(65536, 32768),
+                extra_headers=extra,
+                on_token=on_token,
+                on_think=on_think,
+                job_id=job_id,
+            )
+        if provider == "local":
+            if job_id:
+                _local_backend[job_id] = backend
+            return await ollama_chat_stream(
+                backend,
+                msgs,
+                tools=tools,
+                on_token=on_token,
+                on_think=on_think,
+                timeout=300,
+                job_id=job_id,
+            )
+        if provider == "spark":
+            base = spark_base or SPARK_BASE
+            key = _spark_key_for(base)
+            if not key:
+                raise zen.ZenError(401, "SPARK_API_KEY is missing")
+            return await _openai_with_token_ladder(
+                base,
+                key,
+                backend,
+                msgs,
+                tools=tools,
+                timeout=480,
+                token_steps=(131072, 65536, 32768),
+                extra_payload={"think": False, "reasoning_effort": "none"},
+                on_token=on_token,
+                on_think=on_think,
+                job_id=job_id,
+            )
+        return await _openai_with_token_ladder(
+            zen.BASE,
+            zen.API_KEY,
             backend,
-            messages,
+            msgs,
             tools=tools,
-            timeout=120,
-            extra_headers=extra,
+            timeout=240,
+            token_steps=(65536, 32768),
+            extra_headers={
+                "Authorization": f"Bearer {zen.API_KEY}",
+            },
             on_token=on_token,
             on_think=on_think,
+            job_id=job_id,
         )
-    if provider == "local":
-        return await ollama_chat_stream(
-            backend,
-            messages,
-            tools=tools,
-            on_token=on_token,
-            on_think=on_think,
-            timeout=300,
-        )
-    if provider == "spark":
-        base = spark_base or SPARK_BASE
-        key = _spark_key_for(base)
-        if not key:
-            raise zen.ZenError(401, "SPARK_API_KEY is missing")
-        return await openai_chat_stream(
-            base,
-            key,
-            backend,
-            messages,
-            tools=tools,
-            timeout=300,
-            max_tokens=16384,
-            extra_payload={"think": False, "reasoning_effort": "none"},
-            on_token=on_token,
-            on_think=on_think,
-        )
-    return await openai_chat_stream(
-        zen.BASE,
-        zen.API_KEY,
-        backend,
-        messages,
-        tools=tools,
-        timeout=120,
-        extra_headers={
-            "Authorization": f"Bearer {zen.API_KEY}",
-        },
-        on_token=on_token,
-        on_think=on_think,
-    )
+
+    try:
+        return await send(payload)
+    except asyncio.CancelledError:
+        raise
+    except zen.ZenError as e:
+        if job_aborted(job_id):
+            raise asyncio.CancelledError from e
+        if messages_have_images(payload) and is_multimodal_reject(e.message):
+            return await send(text_only_messages(payload))
+        raise
 
 
 async def complete_with_failover(
@@ -1091,11 +1449,15 @@ async def complete_with_failover(
     agent_id: str = "",
 ) -> tuple[dict[str, Any], str]:
     await refresh_local()
-    await refresh_spark()
-    await refresh_spark2()
-    chain = failover_chain(preferred)
+    mid = (preferred or "").strip()
+    if messages_have_images(messages) and not model_accepts_images(mid):
+        vis = pick_vision_model({"model": mid})
+        if vis and model_accepts_images(vis):
+            mid = vis
+    chain = failover_chain(mid)
     last_error: zen.ZenError | None = None
     for model_id in chain:
+        _raise_if_aborted(job_id)
         provider, _backend = parse_model(model_id)
         label = label_for(model_id)
         if provider == "openrouter" and not openrouter_enabled():
@@ -1117,6 +1479,7 @@ async def complete_with_failover(
                     import plant
 
                     plant.hold_local(job_id, agent_id, model_id)
+                    _local_backend[job_id] = _backend
             if provider == "spark":
                 claimed = await claim_spark_box()
                 if not claimed:
@@ -1184,17 +1547,26 @@ async def complete_with_failover(
                         on_token=wrapped_token,
                         on_think=wrapped_think,
                         spark_base=spark_box or None,
+                        job_id=job_id,
                     )
                 finally:
                     pulse.cancel()
 
             try:
                 data = await run(tools)
+            except asyncio.CancelledError:
+                raise
             except zen.ZenError as e:
+                if job_aborted(job_id):
+                    raise asyncio.CancelledError from e
                 if tools and is_tool_json_error(e.message):
                     try:
                         data = await run(None)
+                    except asyncio.CancelledError:
+                        raise
                     except zen.ZenError as again:
+                        if job_aborted(job_id):
+                            raise asyncio.CancelledError from again
                         last_error = again
                         if on_caption:
                             on_caption(f"{label} couldn’t run")
@@ -1209,7 +1581,11 @@ async def complete_with_failover(
             if tools and not (msg.get("content") or "").strip() and not (msg.get("tool_calls") or []):
                 try:
                     data = await run(None)
+                except asyncio.CancelledError:
+                    raise
                 except zen.ZenError:
+                    if job_aborted(job_id):
+                        raise asyncio.CancelledError
                     pass
             return data, model_id
         finally:
@@ -1219,6 +1595,7 @@ async def complete_with_failover(
                     import plant
 
                     plant.release_local(job_id)
+                    _local_backend.pop(job_id, None)
             if spark_box:
                 await release_spark_box(spark_box)
                 if job_id:
@@ -1232,11 +1609,12 @@ async def complete_with_failover(
     raise last_error or zen.ZenError(502, "No model could run this job")
 
 
-async def snapshot() -> dict[str, Any]:
-    local_names = await refresh_local()
-    router_ok = await refresh_openrouter()
-    spark_names = await refresh_spark()
-    zen_ok = bool(os.getenv("OPENCODE_API_KEY"))
+def _assemble(
+    local_names: set[str],
+    router_ok: bool,
+    spark_names: set[str],
+    zen_ok: bool,
+) -> dict[str, Any]:
     catalog: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -1289,9 +1667,14 @@ async def snapshot() -> dict[str, Any]:
     for row in ZEN_PINNED:
         push(row, zen_ok)
 
+    try:
+        default = default_model_id()
+    except Exception:
+        default = "big-pickle"
+
     return {
         "catalog": catalog,
-        "default": default_model_id(),
+        "default": default,
         "openrouter": router_ok,
         "ollama": bool(local_names),
         "spark": bool(spark_names),
@@ -1299,3 +1682,22 @@ async def snapshot() -> dict[str, Any]:
         "chat": [row["id"] for row in catalog if row["available"]],
         "models": [row["id"] for row in catalog],
     }
+
+
+def fallback_snapshot() -> dict[str, Any]:
+    """Pinned desks even when Ollama / Spark / OpenRouter probes fail."""
+    return _assemble(_ollama_models, _openrouter_ok, _spark_models, bool(os.getenv("OPENCODE_API_KEY")))
+
+
+async def snapshot() -> dict[str, Any]:
+    try:
+        now = time.monotonic()
+        if _ollama_until <= now:
+            await refresh_local()
+        if _openrouter_until <= now:
+            _spawn(refresh_openrouter())
+        if _spark_until <= now:
+            _spawn(refresh_spark())
+        return fallback_snapshot()
+    except Exception:
+        return fallback_snapshot()

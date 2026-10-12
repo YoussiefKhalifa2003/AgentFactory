@@ -5,6 +5,7 @@ import { Moon, Sun } from "lucide-react";
 import { API_URL, PlantSnapshot, PlantSlot, ShiftNote } from "@/lib/types";
 import { useFactory } from "@/lib/factory";
 import { Meter } from "./ui";
+import { isMuted, setMuted } from "@/lib/voice";
 
 function SlotRow({
   label,
@@ -41,11 +42,20 @@ function SlotRow({
 }
 
 export function PlantPanel() {
-  const { plant, shift, quality, setQuality } = useFactory();
+  const { plant, shift, quality, setQuality, selectedId } = useFactory();
   const [open, setOpen] = useState(false);
   const [latest, setLatest] = useState<ShiftNote | null>(shift);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
+  const [mute, setMute] = useState(false);
+
+  useEffect(() => {
+    setLatest(shift);
+  }, [shift]);
+
+  useEffect(() => {
+    setMute(isMuted());
+  }, [open]);
 
   useEffect(() => {
     setLatest(shift);
@@ -139,6 +149,30 @@ export function PlantPanel() {
           {(note || latest?.note) && (
             <p className="mt-2 max-h-28 overflow-auto text-xs text-[var(--ink-soft)]">{note || latest?.note}</p>
           )}
+          <label className="mt-3 flex items-center justify-between gap-2 text-xs text-[var(--ink-soft)]">
+            Voice
+            <button
+              type="button"
+              className={`btn btn-compact ${mute ? "" : "btn-solid"}`}
+              onClick={() => {
+                const next = !mute;
+                setMute(next);
+                setMuted(next);
+              }}
+            >
+              {mute ? "Muted" : "On"}
+            </button>
+          </label>
+          <button
+            type="button"
+            className="btn btn-compact mt-2 w-full"
+            onClick={async () => {
+              const q = selectedId ? `?agent_id=${encodeURIComponent(selectedId)}` : "";
+              await fetch(`${API_URL}/api/coach/reset${q}`, { method: "POST" });
+            }}
+          >
+            Forget coaching
+          </button>
           <label className="mt-3 block text-xs text-[var(--ink-soft)]">
             Scene quality
             <select
