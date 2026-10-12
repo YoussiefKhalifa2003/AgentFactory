@@ -22,3 +22,5 @@ agents/*/workspace/
 *.log
 .cursor/
 .specstory/
+/package.json
+/vexel-simplified-fairer/
