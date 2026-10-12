@@ -331,20 +331,24 @@ def assign(
 
     if chain:
         import chains as crew
+        import critic as eyes_last
         import foreman as boss
 
         parts = boss.split_task_list(item.get("text") or item.get("prompt") or "")
         steps = [dict(step) for step in chain]
         if len(parts) >= 2:
             steps = boss.apply_list_to_chain(steps, parts)
+        steps = eyes_last.inject_steps(steps, item.get("text") or item.get("prompt") or "")
         return crew.start_from_assign(item, steps, created_by="user")
 
     if foreman:
         import chains as crew
+        import critic as eyes_last
         import foreman as boss
 
         steps = boss.plan(item.get("text") or item.get("prompt") or "")
         if len(steps) >= 2:
+            steps = eyes_last.inject_steps(steps, item.get("text") or item.get("prompt") or "")
             result = crew.start_from_assign(item, steps, created_by="foreman")
             caption = boss.caption_for(steps)
             result["caption"] = caption
@@ -361,6 +365,29 @@ def assign(
         raise LookupError("no agent")
 
     prompt, project_id = _project_prompt(item)
+    import critic as eyes_last
+    import strengths as skillset
+
+    primary = "ops"
+    domain = skillset.ids()
+    for skill in agent.get("strengths") or []:
+        if skill in domain:
+            primary = skill
+            break
+    if primary in eyes_last.SERIOUS:
+        steps = [
+            {
+                "agent_id": agent["id"],
+                "strength": primary,
+                "prompt": "",
+                "inherit": False,
+            }
+        ]
+        injected = eyes_last.inject_steps(steps, prompt)
+        if len(injected) > 1:
+            import chains as crew
+
+            return crew.start_from_assign(item, injected, created_by="user")
     claimed = db.claim_or_queue(agent["id"], item["id"], prompt, project_id)
     return {
         "item": claimed.get("item") or item,

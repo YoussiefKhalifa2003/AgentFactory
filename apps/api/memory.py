@@ -18,6 +18,12 @@ def remember_job(
 ) -> None:
     project_id = str(job.get("project_id") or "")
     body = (output or "").strip()
+    if not project_id:
+        try:
+            if db.brain_ready():
+                project_id = db.BRAIN_ID
+        except Exception:
+            project_id = ""
     if not project_id or not body or body == GENERIC:
         return
     db.remember(
@@ -50,7 +56,8 @@ def preamble(project_id: str, skip_job_id: str = "") -> str:
         used += len(block)
     if not chunks:
         return ""
-    return "Earlier on this project\n\n" + "\n\n".join(chunks)
+    title = "Earlier on this plant" if project_id == db.BRAIN_ID else "Earlier on this project"
+    return title + "\n\n" + "\n\n".join(chunks)
 
 
 def floor_recap(project_id: str = "", skip_job_id: str = "") -> str:
@@ -92,10 +99,22 @@ def list_for_ui(project_id: str, limit: int = 12) -> list[dict[str, Any]]:
 
 def recall(project_id: str, query: str) -> str:
     rows = db.search_memories(project_id, query, limit=5)
+    if project_id == db.BRAIN_ID and len(rows) < 5:
+        seen = {row.get("id") for row in rows}
+        for pid in db.brain_included_project_ids():
+            for row in db.search_memories(pid, query, limit=5):
+                if row.get("id") in seen:
+                    continue
+                rows.append(row)
+                seen.add(row.get("id"))
+                if len(rows) >= 5:
+                    break
+            if len(rows) >= 5:
+                break
     if not rows:
         return "no memories"
     parts = []
-    for row in rows:
+    for row in rows[:5]:
         parts.append(
             f"{row['agent_name']} ({row['status']}): {row['task']}\n{str(row['body'])[:800]}"
         )

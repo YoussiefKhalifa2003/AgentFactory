@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from dotenv import dotenv_values
 
@@ -27,6 +29,20 @@ SKIP_DIRS = {
     ".next",
     "__pycache__",
     ".venv",
+    ".vs",
+    ".idea",
+    "packages",
+    "vendor",
+    "coverage",
+    "target",
+    "bower_components",
+}
+SKIP_FILES = {
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "go.sum",
+    "composer.lock",
 }
 READABLE = {
     ".py",
@@ -34,22 +50,55 @@ READABLE = {
     ".tsx",
     ".js",
     ".jsx",
+    ".mjs",
+    ".cjs",
     ".cs",
+    ".cshtml",
+    ".razor",
     ".json",
     ".md",
     ".yml",
     ".yaml",
     ".xml",
     ".csproj",
+    ".fsproj",
+    ".vbproj",
     ".sln",
     ".html",
     ".css",
+    ".scss",
     ".sql",
     ".txt",
     ".config",
+    ".vue",
+    ".svelte",
+    ".go",
+    ".java",
+    ".kt",
+    ".ps1",
+    ".sh",
+    ".tf",
+    ".rs",
+    ".php",
+    ".rb",
+    ".swift",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".c",
+    ".toml",
+}
+READABLE_NAMES = {
+    "dockerfile",
+    "makefile",
+    "gemfile",
+    "jenkinsfile",
+    "vagrantfile",
+    "procfile",
 }
 MAX_FILE = 200_000
 READ_CAP = 16_000
+STUDY_FILE_CAP = 8_000
 
 
 def cache_dir(project_id: str) -> Path:
@@ -165,7 +214,7 @@ def _git(
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
         env=env,
     )
 
@@ -243,7 +292,118 @@ def _safe_rel(rel: str) -> str:
     return rel
 
 
+def _skip(path: Path, root: Path) -> bool:
+    rel = path.relative_to(root)
+    if any(part in SKIP_DIRS for part in rel.parts):
+        return True
+    return path.name.lower() in SKIP_FILES
+
+
+def _readable(path: Path) -> bool:
+    if path.suffix.lower() in READABLE:
+        return True
+    return path.name.lower() in READABLE_NAMES
+
+
+def _scope_ids(project_id: str) -> list[str]:
+    if project_id == db.BRAIN_ID:
+        return db.brain_included_project_ids()
+    if project_id:
+        return [project_id]
+    return []
+
+
+def _azure_name(project: dict[str, Any] | None) -> str:
+    if not project:
+        return ""
+    return str(project.get("project") or project.get("title") or project.get("name") or "")
+
+
+def search(project_id: str, query: str) -> str:
+    ids = _scope_ids(project_id)
+    needle = (query or "").strip().lower()
+    if not needle:
+        return "error: query required"
+    if not ids:
+        project = db.get_project(project_id) if project_id and project_id != db.BRAIN_ID else None
+        err = (project or {}).get("sync_error") or "not synced"
+        return f"error: code cache is not ready. {err}"
+    hits: list[str] = []
+    plant_wide = project_id == db.BRAIN_ID or len(ids) > 1
+    for pid in ids:
+        project = db.get_project(pid)
+        roots = roots_for(pid)
+        if not roots:
+            continue
+        azure = _azure_name(project)
+        for label, root, _repo_id in roots:
+            local_prefix = f"{label}/" if len(roots) > 1 else ""
+            prefix = f"{azure}/{local_prefix}" if plant_wide and azure else local_prefix
+            for path in root.rglob("*"):
+                if not path.is_file() or _skip(path, root):
+                    continue
+                if not _readable(path):
+                    continue
+                if path.stat().st_size > MAX_FILE:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for i, line in enumerate(text.splitlines(), start=1):
+                    if needle in line.lower():
+                        rel = path.relative_to(root).as_posix()
+                        snippet = line.strip()[:160]
+                        hits.append(f"{prefix}{rel}:{i}: {snippet}")
+                        cap = 40 if plant_wide else 20
+                        if len(hits) >= cap:
+                            return "\n".join(hits)
+    if hits:
+        return "\n".join(hits)
+    if project_id == db.BRAIN_ID:
+        return "error: code cache is not ready. not synced" if not any(roots_for(pid) for pid in ids) else "no matches"
+    project = db.get_project(ids[0]) if ids else None
+    if not roots_for(ids[0]):
+        err = (project or {}).get("sync_error") or "not synced"
+        return f"error: code cache is not ready. {err}"
+    return "no matches"
+
+
+def _resolve_brain(rel: str) -> Path:
+    rel = _safe_rel(rel)
+    parts = rel.split("/")
+    if not parts:
+        raise FileNotFoundError("code cache is not ready")
+    head = parts[0].lower()
+    rest = "/".join(parts[1:])
+    for row in db.list_brain_projects(included_only=True):
+        pid = str(row.get("project_id") or "")
+        if not pid:
+            continue
+        project = db.get_project(pid)
+        azure = _azure_name(project).lower()
+        if head == azure or head == str(row.get("name") or "").lower():
+            if not rest:
+                raise ValueError("path refused")
+            return resolve(pid, rest)
+    last_error: Exception | None = None
+    for pid in db.brain_included_project_ids():
+        try:
+            return resolve(pid, rel)
+        except FileNotFoundError as exc:
+            last_error = exc
+            continue
+        except ValueError as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise last_error
+    raise FileNotFoundError("code cache is not ready")
+
+
 def resolve(project_id: str, rel: str) -> Path:
+    if project_id == db.BRAIN_ID:
+        return _resolve_brain(rel)
     rel = _safe_rel(rel)
     roots = roots_for(project_id)
     if not roots:
@@ -272,48 +432,13 @@ def resolve(project_id: str, rel: str) -> Path:
     raise FileNotFoundError("code cache is not ready")
 
 
-def _skip(path: Path, root: Path) -> bool:
-    rel = path.relative_to(root)
-    return any(part in SKIP_DIRS for part in rel.parts)
-
-
-def search(project_id: str, query: str) -> str:
-    project = db.get_project(project_id)
-    roots = roots_for(project_id)
-    if not roots:
-        err = (project or {}).get("sync_error") or "not synced"
-        return f"error: code cache is not ready. {err}"
-    needle = (query or "").strip().lower()
-    if not needle:
-        return "error: query required"
-    hits: list[str] = []
-    for label, root, _repo_id in roots:
-        prefix = f"{label}/" if len(roots) > 1 else ""
-        for path in root.rglob("*"):
-            if not path.is_file() or _skip(path, root):
-                continue
-            if path.suffix.lower() not in READABLE:
-                continue
-            if path.stat().st_size > MAX_FILE:
-                continue
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            for i, line in enumerate(text.splitlines(), start=1):
-                if needle in line.lower():
-                    rel = path.relative_to(root).as_posix()
-                    snippet = line.strip()[:160]
-                    hits.append(f"{prefix}{rel}:{i}: {snippet}")
-                    if len(hits) >= 20:
-                        return "\n".join(hits)
-    return "\n".join(hits) or "no matches"
-
-
 def read_file(project_id: str, rel: str) -> str:
-    project = db.get_project(project_id)
+    scope = project_id if project_id != db.BRAIN_ID else db.BRAIN_ID
+    project = None
+    if scope != db.BRAIN_ID:
+        project = db.get_project(scope)
     try:
-        path = resolve(project_id, rel)
+        path = resolve(scope, rel)
     except FileNotFoundError:
         err = (project or {}).get("sync_error") or "not synced"
         return f"error: code cache is not ready. {err}"
@@ -321,7 +446,7 @@ def read_file(project_id: str, rel: str) -> str:
         return "error: path refused"
     if not path.is_file():
         return "error: path refused"
-    if path.suffix.lower() not in READABLE:
+    if not _readable(path):
         return "error: path refused"
     if path.stat().st_size > MAX_FILE:
         return "error: file too large"
@@ -357,3 +482,108 @@ def tree_map(project_id: str) -> str:
         if len("\n".join(lines)) > 2000:
             break
     return "\n".join(lines)[:2000]
+
+
+_SYMBOL = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?(?:public\s+|private\s+|internal\s+|protected\s+)?"
+    r"(?:static\s+)?(?:partial\s+)?"
+    r"(?:function|class|def|interface|type|enum|namespace|module|struct|record)\s+(\w+)",
+    re.I,
+)
+_MANIFEST = {
+    "readme.md",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "dockerfile",
+    "cargo.toml",
+    "go.mod",
+    "pom.xml",
+    "composer.json",
+    "gemfile",
+    "pubspec.yaml",
+    "csproj",
+}
+
+
+def _file_sketch(path: Path) -> str:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")[:STUDY_FILE_CAP]
+    except OSError:
+        return ""
+    names: list[str] = []
+    first = ""
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not first and not stripped.startswith(("*", "/", "#", "<!--", "{", "[")):
+            first = stripped[:120]
+        elif not first and stripped.startswith("#") and not stripped.startswith("#!"):
+            first = stripped.lstrip("# ").strip()[:120]
+        match = _SYMBOL.match(line)
+        if match and match.group(1) not in names:
+            names.append(match.group(1))
+        if len(names) >= 8:
+            break
+    bits = []
+    if first:
+        bits.append(first)
+    if names:
+        bits.append(" ".join(names[:8]))
+    return " · ".join(bits)[:180]
+
+
+def study_walk(project_id: str) -> dict[str, Any]:
+    """Catalog every readable file in this project's checkouts. No model call."""
+    roots = roots_for(project_id)
+    if not roots:
+        return {"files": 0, "repos": 0, "text": "", "paths": []}
+    azure = _azure_name(db.get_project(project_id))
+    chunks: list[str] = []
+    paths: list[str] = []
+    files = 0
+    for label, root, _repo_id in roots:
+        heading = f"{azure}/{label}" if azure else label
+        lines = [f"## {heading}"]
+        readme = None
+        for candidate in ("README.md", "readme.md", "README.MD"):
+            if (root / candidate).is_file():
+                readme = root / candidate
+                break
+        if readme:
+            excerpt = "\n".join(readme.read_text(encoding="utf-8", errors="replace").splitlines()[:24])
+            lines.append(excerpt[:1200].rstrip())
+        listed: list[str] = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or _skip(path, root):
+                continue
+            if not _readable(path):
+                continue
+            try:
+                if path.stat().st_size > MAX_FILE:
+                    continue
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            files += 1
+            prefixed = f"{heading}/{rel}"
+            paths.append(prefixed)
+            key = path.name.lower()
+            suffix = path.suffix.lower().lstrip(".")
+            sketch = _file_sketch(path)
+            if key in _MANIFEST or suffix in {"csproj", "sln", "fsproj"}:
+                listed.append(f"- {rel}: {sketch}" if sketch else f"- {rel}")
+            else:
+                listed.append(f"- {rel}" + (f" — {sketch}" if sketch else ""))
+            if len(listed) >= 400:
+                listed.append("- …")
+                break
+        lines.extend(listed)
+        chunks.append("\n".join(lines))
+    return {
+        "files": files,
+        "repos": len(roots),
+        "text": "\n\n".join(chunks),
+        "paths": paths,
+    }
