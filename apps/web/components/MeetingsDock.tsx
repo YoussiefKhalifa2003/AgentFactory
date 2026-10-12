@@ -525,7 +525,7 @@ export function ListsSidebar({
             {linkError && <p className="mt-1 text-xs text-[#b42318]">{linkError}</p>}
             {!codeRead && (
               <p className="mt-1 text-[11px] leading-4 text-[var(--ink-soft)]">
-                The list will still link. To pull files, add AZURE_DEVOPS_PAT to apps/api/.env, then press Sync.
+                The list will still link. To pull files, add AZURE_DEVOPS_PAT to apps/api/.env (same token as Brain), then press Sync.
               </p>
             )}
             {shelf.length > 0 && (
