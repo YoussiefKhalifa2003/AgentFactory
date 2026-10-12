@@ -1,0 +1,4 @@
+Cortical mesh from Brain for Blender by Anderson Winkler
+https://brainder.org/research/brain-for-blender/
+Licensed under Creative Commons Attribution-ShareAlike 3.0 Unported
+https://creativecommons.org/licenses/by-sa/3.0/
