@@ -41,6 +41,6 @@ CORS allows `localhost:3001`. To iterate on a real iPhone, serve 3001 over Tails
 | --- | --- |
 | Lists | Inbox / Done / custom lists. Tap an open row → One / Crew / Split, then `POST /api/assign`. |
 | Floor | Agent cards, plant dots, night-shift status (read-only). Tap a card → Desk. |
-| Desk | Live thread, View / Save, one-off task (`list_id: inbox`), cancel. |
+| Desk | Live thread, View / Save, hold-to-talk, one-off task (`list_id: inbox`), cancel. |
 
-No 3D office, no Forge, no service worker (a stale shell would lie about live jobs).
+Hold the mic on Desk to speak a job. View and Save work like the PC desk. No 3D office, no Forge, no Agent Brain specimen, no service worker (a stale shell would lie about live jobs). Models stay on the PC.
