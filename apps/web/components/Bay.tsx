@@ -58,7 +58,10 @@ export function Bay({
 
   function onDragOver(e: DragEvent) {
     const types = [...e.dataTransfer.types];
-    if (!types.some((t) => t.includes("foundry") || t.includes("meeting") || t === "text/plain")) {
+    if (
+      !types.some((t) => t.includes("foundry") || t.includes("meeting") || t === "text/plain") &&
+      !types.includes("Files")
+    ) {
       return;
     }
     e.preventDefault();
@@ -70,6 +73,15 @@ export function Bay({
     e.preventDefault();
     e.stopPropagation();
     setDropOver(false);
+    const files = [...(e.dataTransfer.files || [])].filter((f) => {
+      const t = (f.type || "").toLowerCase();
+      return t.startsWith("image/") || t === "application/pdf";
+    });
+    if (files.length) {
+      select(agent.id);
+      assignWork({ agentId: agent.id, text: "Look at this", listId: "inbox", files }).catch(() => undefined);
+      return;
+    }
     const item = parseTaskDrag(e.dataTransfer);
     if (!item) return;
     select(agent.id);

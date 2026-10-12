@@ -10,7 +10,7 @@ import { Station, WebGLFallback, FreeOrbit } from "../WorkerCanvas";
 import { OfficeScene } from "../OfficeCanvas";
 import { CameraDirector, PostFX } from "./PostFX";
 import { IsoOffice } from "./IsoOffice";
-import { GAP_X, GAP_Z, deskSlots, deskPos, dioramaView } from "./layout";
+import { GAP_X, GAP_Z, deskSlots, dioramaView } from "./layout";
 
 function DioramaRig({
   position,
@@ -41,6 +41,11 @@ function DioramaRig({
   return null;
 }
 
+function readShot() {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("shot");
+}
+
 export function SceneRoot({ className }: { className?: string }) {
   const { agents, live, selectedId, stageMode, chains, showroom, shift, plant, quality, select, openPreview } =
     useFactory();
@@ -54,19 +59,24 @@ export function SceneRoot({ className }: { className?: string }) {
   const width = Math.max(cols * GAP_X, 8.2);
   const depth = Math.max(rows * GAP_Z + 3.4, 10.5);
   const cx = width / 2 - GAP_X / 2;
-  const deskIndex = Math.max(0, agents.findIndex((a) => a.id === agent?.id));
-  const desk = deskPos(deskIndex, cols);
+  const shot = readShot();
 
   const officeCam = useMemo<[number, number, number]>(() => [cx + 4.2, 3.15, depth + 5.4], [cx, depth]);
-  const deskCam = useMemo<[number, number, number]>(
-    () => [desk[0] + 0.22, 1.55, desk[2] + 2.72],
-    [desk]
-  );
+  const deskCam = useMemo<[number, number, number]>(() => {
+    if (shot === "face") return [1.18, 1.14, 0.08];
+    if (shot === "front") return [1.42, 0.9, 0.7];
+    if (shot === "legs") return [1.05, 0.26, 0.78];
+    if (shot === "side") return [0.48, 0.82, 1.48];
+    return [1.52, 1.36, 2.18];
+  }, [agent?.id, shot]);
   const officeLook = useMemo<[number, number, number]>(() => [cx, 0.9, depth * 0.42], [cx, depth]);
-  const deskLook = useMemo<[number, number, number]>(
-    () => [desk[0] + 0.72, 0.74, desk[2]],
-    [desk]
-  );
+  const deskLook = useMemo<[number, number, number]>(() => {
+    if (shot === "face") return [0.32, 1.08, 0];
+    if (shot === "front") return [0.28, 0.76, 0];
+    if (shot === "legs") return [0.4, 0.14, 0.02];
+    if (shot === "side") return [0.26, 0.7, 0];
+    return [0.22, 1.04, 0.02];
+  }, [agent?.id, shot]);
   const cam = stageMode === "desk" ? deskCam : officeCam;
   const look = stageMode === "desk" ? deskLook : officeLook;
 
@@ -88,9 +98,10 @@ export function SceneRoot({ className }: { className?: string }) {
     >
       <div className={`relative min-h-0 w-full ${className || "h-full"}`}>
         <Canvas
+          key={stageMode === "desk" ? `desk-${agent?.id}` : "office"}
           className="absolute inset-0 h-full w-full"
           shadows={quality !== "low"}
-          camera={{ position: cam, fov: stageMode === "desk" ? 32 : 36, near: 0.08, far: 280 }}
+          camera={{ position: cam, fov: stageMode === "desk" ? 34 : 36, near: 0.08, far: 280 }}
           dpr={quality === "high" ? [1, 1.5] : [1, 1.25]}
           style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }}
           gl={{
@@ -110,9 +121,9 @@ export function SceneRoot({ className }: { className?: string }) {
             {stageMode === "desk" && agent ? (
               <>
                 <color attach="background" args={[night ? "#12100e" : "#d9cbb8"]} />
-                <Station agent={agent} activity={activity} feed={feed} night={night} />
+                <Station key={agent.id} agent={agent} activity={activity} feed={feed} night={night} room />
                 <ContactShadows frames={1} position={[0, 0.01, 0]} opacity={0.34} scale={9} blur={2.4} far={5} />
-                <FreeOrbit lookAt={[0.72, 0.74, 0]} minDistance={0.55} maxDistance={22} />
+                <FreeOrbit lookAt={look} minDistance={0.7} maxDistance={8} />
               </>
             ) : (
               <OfficeScene

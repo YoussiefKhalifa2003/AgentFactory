@@ -1,12 +1,14 @@
 "use client";
 
-import { Component, ReactNode, RefObject, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Component, ReactNode, RefObject, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { ContactShadows, OrbitControls, RoundedBox, Text } from "@react-three/drei";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { Agent, Activity, strengthLabel } from "@/lib/types";
 import { AgentLook, parseLook } from "@/lib/look";
+import { SpeechBubble } from "./scene/SpeechBubble";
+import { HamzaWorker, isHamzaAgent } from "./scene/HamzaFigure";
 import {
   Bookshelf,
   Clock,
@@ -859,7 +861,7 @@ function HeadParts({
   );
 }
 
-function Worker({ agent, activity }: { agent: Agent; activity: Activity }) {
+function CapsuleWorker({ agent, activity, stand }: { agent: Agent; activity: Activity; stand?: boolean }) {
   const torso = useRef<THREE.Group>(null);
   const head = useRef<THREE.Group>(null);
   const leftHand = useRef<THREE.Group>(null);
@@ -906,7 +908,8 @@ function Worker({ agent, activity }: { agent: Agent; activity: Activity }) {
 
     if (torso.current) {
       torso.current.rotation.z = done ? 0.02 : blocked ? 0.16 : busy ? 0.1 : 0.08;
-      torso.current.position.y = Math.sin(t * (busy ? 2.2 : 1.5)) * (busy ? 0.01 : 0.006);
+      torso.current.position.y =
+        (stand ? 0.1 : 0) + Math.sin(t * (busy ? 2.2 : 1.5)) * (busy ? 0.01 : 0.006);
     }
     if (head.current) {
       if (think) {
@@ -1018,6 +1021,17 @@ function Worker({ agent, activity }: { agent: Agent; activity: Activity }) {
       </group>
     </group>
   );
+}
+
+function Worker({ agent, activity, stand }: { agent: Agent; activity: Activity; stand?: boolean }) {
+  if (isHamzaAgent(agent)) {
+    return (
+      <Suspense fallback={null}>
+        <HamzaWorker agent={agent} activity={activity} stand={stand} />
+      </Suspense>
+    );
+  }
+  return <CapsuleWorker agent={agent} activity={activity} stand={stand} />;
 }
 
 function Desk({
@@ -1240,8 +1254,9 @@ export function Station({
         <group position={[0.08, 0, 0]}>
           <OfficeChair />
         </group>
-        <Worker agent={agent} activity={activity} />
+        <Worker agent={agent} activity={activity} stand={working} />
         <Desk agent={agent} activity={activity} feed={feed} />
+        <SpeechBubble caption={feed || (working ? "Working" : "")} activity={activity} />
         {room && <NamePlaque name={agent.name} night={night} />}
         {room && <DeskLamp on={night ? working : false} />}
       </group>
@@ -1271,11 +1286,11 @@ export function WorkerCanvas({
     () =>
       preview
         ? { position: [2.15, 1.85, 3.35] as [number, number, number], fov: 38, near: 0.08, far: 160 }
-        : { position: [0.22, 1.55, 2.72] as [number, number, number], fov: 32, near: 0.08, far: 160 },
+        : { position: [1.52, 1.36, 2.18] as [number, number, number], fov: 34, near: 0.08, far: 160 },
     [preview]
   );
   const lookAt = useMemo<[number, number, number]>(
-    () => (preview ? [0.55, 0.86, 0] : [0.72, 0.74, 0]),
+    () => (preview ? [0.55, 0.86, 0] : [0.22, 1.04, 0.02]),
     [preview]
   );
   const strengths = (agent.strengths || []).map(strengthLabel).join(" · ") || "General";
@@ -1329,7 +1344,9 @@ export function WorkerCanvas({
             shadow-camera-bottom={-4}
           />
           {!night && <directionalLight position={[2.2, 2.4, -1.8]} intensity={0.32} color="#ffd9a8" />}
-          <Station agent={agent} activity={activity} feed={feed} night={night} />
+          <Suspense fallback={null}>
+            <Station agent={agent} activity={activity} feed={feed} night={night} />
+          </Suspense>
           <ContactShadows
             frames={1}
             position={[0, 0.01, 0]}

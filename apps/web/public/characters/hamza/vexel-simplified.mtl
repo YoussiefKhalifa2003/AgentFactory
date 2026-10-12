@@ -1,0 +1,99 @@
+newmtl skin
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/skin.png
+
+newmtl hair
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/hair.png
+
+newmtl shirt
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/shirt.png
+
+newmtl jeans
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/jeans.png
+
+newmtl red
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/red.png
+
+newmtl white
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/white.png
+
+newmtl black
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/black.png
+
+newmtl mouth
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/mouth.png
+
+newmtl iris
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/iris.png
+
+newmtl lip
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/lip.png
+
+newmtl beard
+Ka 0.1 0.1 0.1
+Kd 1 1 1
+Ks 0.12 0.12 0.12
+Ns 28
+d 1
+illum 2
+map_Kd textures/beard.png
+
