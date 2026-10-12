@@ -21,6 +21,8 @@ This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com
 
 ## Contents
 
+- [What this is](docs/SYSTEM.md) — the full story, plain language and technical
+- [Agent Brain](#agent-brain)
 - [What you get](#what-you-get)
 - [Tour](#tour)
 - [Strengths](#strengths)
@@ -48,9 +50,10 @@ This is the workspace at [`YoussiefKhalifa2003/AgentFactory`](https://github.com
 | **Forge** | Create an agent: look, one or two strengths, optional tool skills, a brain |
 | **Desk** | Assign work, read the finished answer, **View** / **Download** files |
 | **Office** | Optional 3D room of *every* desk — never opened by clicking a bay. A live diorama sits on the Floor; click it to walk in.
+| **Agent Brain** | Paste an Azure org: every project, every repo, every file is cloned and catalogued. Clay specimen in the header — not Insights, not Office, never from a bay click.
 | **Jobs** | Stored work with status, tokens, artifacts — not a throwaway chat log |
 
-The header lists every busy name (`Ada and Euclid are working`). Four labelled plant rows (This PC, Spark 1, Spark 2, Cloud) sit in the Plant chip. `Ctrl+K` opens the command palette. Insights and Results are in the header, not buried.
+The header lists every busy name (`Ada and Euclid are working`). Four labelled plant rows (This PC, Spark 1, Spark 2, Cloud) sit in the Plant chip. **Brain** sits next to Plant. `Ctrl+K` opens the command palette. Insights and Results are in the header, not buried.
 
 A list can send work down a **crew** (Scout then Cade then Hamza) or **Let the floor split it**. Drop on a bay is still one desk. Finished View files land on a **showroom** under the bays and in **Results**. **Start night shift** in Plant runs parked items up to eight, then the morning note lists finishes, blocks, and pins.
 
@@ -139,15 +142,33 @@ A writing desk drafts in the thread. A writing desk **with PDF** produces a pack
 
 Discovery: any `skills/<name>/SKILL.md` with YAML `kind: tool` appears in the Tools list automatically.
 
+## Agent Brain
+
+Header **Brain** opens a clay specimen and a paper card. Paste an Azure org URL (for example `https://tatweer-co.visualstudio.com/`). Agent Brain lists every project, clones every git repo, and reads every text file into a plant catalog. Uncheck a project only if you want it dropped later. Inbox and palette jobs with no list pin inherit that estate: wiki, the catalog, then `repo_search` / `repo_read` / `recall` across the org. A list pin still wins for that list. Models are not retrained. The PAT never appears in the UI or the prompt.
+
 ## Linked repositories
 
-A list, including a meeting list, can be linked to a Tatweer Azure DevOps project. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code read). You can add the token and press **Sync** without restarting the API. Projects stay on a shelf so you do not paste the same git URL every time: pick Stormcast, or paste a new repo link. **Refresh** / **Sync** pulls the local cache. Extra repos on the same project live beside the default checkout. The list still links if the token is not set yet; desks cannot read the repo until Sync succeeds.
+A list, including a meeting list, can be linked to a Tatweer Azure DevOps project. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code-read scope). The same token serves **Brain** discover/sync and a list Sync. You can add the token and press **Sync** without restarting the API. Projects stay on a shelf so you do not paste the same git URL every time: pick Stormcast, or paste a new repo link. **Refresh** / **Sync** pulls the local cache. Extra repos on the same project live beside the default checkout. The list still links if the token is not set yet; desks cannot read the repo until Sync succeeds. Discover does not hit Azure until the token is present.
 
 Every desk that receives a task from that list can search and read those files. Planning and writing desks get that access too. They still do not get the sandbox write tools.
 
 Finished work on that project is remembered on a shared ledger. The next desk on the same project sees who did the earlier job, what they wrote, and a short line for whoever is on the floor now. A different project does not. The token is never stored in the database or the prompt.
 
 The header power strip shows four dots: This PC (the 4090), Spark 1, Spark 2, and Cloud. Spark 2 stays dark if its engineer key is rejected.
+
+---
+
+## Eyes, critic, voice, games
+
+Drop a screenshot or PDF on a desk (or paste into the field). Files land in `eyes/`. Vision models already in the catalog (`local:qwen3-vl:8b`, Spark VL) look at them. Without a VL model the image stays on the desk and the job continues.
+
+Serious coding, maths, and QA jobs get a **critic** on a second idle desk. That critic writes `critic.md` (Verdict + Findings). High/block findings re-queue the producer once. One desk on the floor skips the critic rather than judging itself.
+
+Night shift still caps at eight launches. When the queue is quiet it retries blocked jobs once, writes a short overlay under `.run/skills/<agent>/` (never git `skills/*/SKILL.md`), and the morning note lists who was coached. Plant has **Forget coaching** and a Voice mute.
+
+Hold the mic on the desk, header, or phone. Speech is the job prompt. Crew handoff speaks the first sentence. Office already open: the agent stands and a bubble shows. Bay click still never opens 3D.
+
+Ask Hamza for a game and the desk must ship a module tree (`js/main.js`, `js/input.js`, `js/entities.js`, `js/net.js`, `maps/level.json`, `assets/`, `README.md`), not three files. Multiplayer uses `window.FOUNDRY_GAME_WS` — a factory WebSocket room for that job, not the sandbox network. Open View, press Start; a second browser or the phone can join. Optional: `playwright install chrome` so QA can screenshot Start.
 
 ---
 
@@ -295,6 +316,7 @@ Fill what you use. Never commit `.env`.
 cd apps/api
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\python -m playwright install chrome
 .\.venv\Scripts\python -m uvicorn main:app --reload --reload-exclude "$PWD\.venv" --host 127.0.0.1 --port 8000
 ```
 
@@ -347,7 +369,7 @@ Then `tailscale serve --bg 8000` and Safari → Add to Home Screen. Do not expos
 | `SPARK2_API_KEY` | Engineer key for Spark 2 (Spark 1’s key does not work here) |
 | `MEETING_NOTES_DB_PATH` | Optional Meeting Note Taker SQLite |
 | `MEETING_ME_ALIASES` | Names treated as “mine” on meeting actions |
-| `AZURE_DEVOPS_PAT` | Read code from a linked Azure DevOps repository |
+| `AZURE_DEVOPS_PAT` | Code-read scope. Sync in Brain or on a list. |
 | `HOST` / `PORT` | API bind (default `127.0.0.1:8000`) |
 | `FOUNDRY_TOKEN` | Optional. If set, HTTP `Authorization: Bearer` and WebSocket `?token=` are required |
 
@@ -377,7 +399,13 @@ Frontend (optional, `apps/web/.env.local`):
 | `POST` | `/api/projects/{id}/repos` | Add another repo on that project |
 | `GET` | `/api/projects/{id}/memory` | Shared ledger for that project |
 | `GET` | `/api/plant` | This PC / Spark / Cloud occupancy |
-| `POST` | `/api/assign` | Hand a list item or text to a desk. Optional `chain` or `foreman` |
+| `GET`/`PUT` | `/api/brain` | Plant-wide Agent Brain snapshot / save |
+| `POST` | `/api/brain/discover` | List every Azure project, then clone and catalog every repo |
+| `POST` | `/api/brain/sync` | Refresh clones and recatalog every included file |
+| `POST` | `/api/assign` | Hand a list item or text to a desk. JSON or multipart (`files` + fields). Optional `chain` or `foreman` |
+| `POST` | `/api/jobs/{id}/eyes` | Drop images onto a running job |
+| `POST` | `/api/coach/reset` | Forget overlays / route stats (`?agent_id=`) |
+| `WS` | `/api/games/{id}/ws` | Multiplayer relay for a game job |
 | `GET` | `/api/chains/{id}` | Handoff steps |
 | `GET` | `/api/showroom` | Floor pins |
 | `POST`/`DELETE` | `/api/pins` | Pin or unpin a View file |
@@ -391,7 +419,7 @@ Frontend (optional, `apps/web/.env.local`):
 | `GET` | `/api/jobs/{id}/site/{path}` | Inline website |
 | `GET` | `/api/stats` | Desk stats for Insights |
 | `GET` | `/api/artifacts/{id}/file` | Inline; `?download=1` to save |
-| `WS` | `/ws` | `job.token`, `job.activity`, `job.trace`, `job.done`, `job.artifact`, `job.file`, `plant`, `chain.updated`, `shift.updated` |
+| `WS` | `/ws` | `job.token`, `job.activity`, `job.trace`, `job.done`, `job.artifact`, `job.file`, `plant`, `brain.updated`, `chain.updated`, `shift.updated` |
 
 Sandbox: timed Python, no network, path confined to that job’s folder.
 
