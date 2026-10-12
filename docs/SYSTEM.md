@@ -32,7 +32,7 @@ Three panes:
 
 **Phone** (`AI_HarnessPhone`) is a PWA: Lists / Floor / Desk, hold-to-talk, View. No 3D. No Forge. No Agent Brain specimen. Models stay on the PC.
 
-**Agent Brain** is plant-wide Azure knowledge, not a model and not Insights. Header **Brain** (or the command palette) opens a clay specimen overlay: paste an org link and it clones every project and every repo, then catalogs every text file. Lists can still pin one repo. Inbox jobs with no list pin inherit Brain. Bay click never opens Brain or Office.
+**Agent Brain** is plant-wide Azure knowledge, not a model and not Insights. Header **Brain** (or the command palette) opens a clay specimen overlay: paste an org link, then **Study the estate**. That clones every project and every repo and catalogs every text file. The PAT lives in `apps/api/.env` (`AZURE_DEVOPS_PAT`, Code Read + Project and Team Read) from the org’s Personal access tokens page. Lists can still pin one repo. Inbox jobs with no list pin inherit Brain. Bay click never opens Brain or Office.
 
 If the roster is empty, three starters are seeded: **Ada** (coding), **Euclid** (maths), **Scout** (research). Other names (Cade, Hamza) are people you forge, not defaults.
 
