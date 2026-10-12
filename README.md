@@ -144,11 +144,13 @@ Discovery: any `skills/<name>/SKILL.md` with YAML `kind: tool` appears in the To
 
 ## Agent Brain
 
-Header **Brain** opens a clay specimen and a paper card. Paste an Azure org URL (for example `https://tatweer-co.visualstudio.com/`). Agent Brain lists every project, clones every git repo, and reads every text file into a plant catalog. Uncheck a project only if you want it dropped later. Inbox and palette jobs with no list pin inherit that estate: wiki, the catalog, then `repo_search` / `repo_read` / `recall` across the org. A list pin still wins for that list. Models are not retrained. The PAT never appears in the UI or the prompt.
+Header **Brain** opens a clay specimen and a paper card. Paste an Azure org URL (for example `https://tatweer-co.visualstudio.com/`) and press **Study the estate**. Agent Brain lists every project, clones every git repo, and reads every text file into a plant catalog. Uncheck a project only if you want it dropped later. Inbox and palette jobs with no list pin inherit that estate: wiki, the catalog, then `repo_search` / `repo_read` / `recall` across the org. A list pin still wins for that list. Models are not retrained. The PAT never appears in the UI or the prompt.
+
+Create the token on the org: portrait → **Personal access tokens** (or `https://<org>.visualstudio.com/_usersSettings/tokens`). Custom scopes: **Code → Read**, **Project and Team → Read**, and **Wiki → Read** if you want the wiki brief. Put it in `apps/api/.env` as `AZURE_DEVOPS_PAT`. Do not grant write or Full.
 
 ## Linked repositories
 
-A list, including a meeting list, can be linked to a Tatweer Azure DevOps project. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (code-read scope). The same token serves **Brain** discover/sync and a list Sync. You can add the token and press **Sync** without restarting the API. Projects stay on a shelf so you do not paste the same git URL every time: pick Stormcast, or paste a new repo link. **Refresh** / **Sync** pulls the local cache. Extra repos on the same project live beside the default checkout. The list still links if the token is not set yet; desks cannot read the repo until Sync succeeds. Discover does not hit Azure until the token is present.
+A list, including a meeting list, can be linked to a Tatweer Azure DevOps project. Put `AZURE_DEVOPS_PAT` in `apps/api/.env` (Code Read + Project and Team Read). The same token serves **Brain** and a list Sync. You can add the token and press **Study the estate** or **Sync** without restarting the API. Projects stay on a shelf so you do not paste the same git URL every time: pick Stormcast, or paste a new repo link. **Refresh** / **Sync** pulls the local cache. Extra repos on the same project live beside the default checkout. The list still links if the token is not set yet; desks cannot read the repo until Sync succeeds. Discover does not hit Azure until the token is present.
 
 Every desk that receives a task from that list can search and read those files. Planning and writing desks get that access too. They still do not get the sandbox write tools.
 
@@ -369,7 +371,7 @@ Then `tailscale serve --bg 8000` and Safari → Add to Home Screen. Do not expos
 | `SPARK2_API_KEY` | Engineer key for Spark 2 (Spark 1’s key does not work here) |
 | `MEETING_NOTES_DB_PATH` | Optional Meeting Note Taker SQLite |
 | `MEETING_ME_ALIASES` | Names treated as “mine” on meeting actions |
-| `AZURE_DEVOPS_PAT` | Code-read scope. Sync in Brain or on a list. |
+| `AZURE_DEVOPS_PAT` | Code Read + Project and Team Read. Brain Study the estate, or Sync on a list. |
 | `HOST` / `PORT` | API bind (default `127.0.0.1:8000`) |
 | `FOUNDRY_TOKEN` | Optional. If set, HTTP `Authorization: Bearer` and WebSocket `?token=` are required |
 
