@@ -12,7 +12,15 @@ from db import WORKSPACES
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._/-]+$")
 MAX_FILE_BYTES = 400_000
+MAX_BINARY_BYTES = 1_200_000
+READ_TOOL_CAP = 80_000
+BINARY_EXTS = {".png", ".webp", ".jpg", ".jpeg", ".gif", ".wav", ".mp3"}
 RUN_TIMEOUT = 25
+
+
+def max_bytes_for(rel: str) -> int:
+    suffix = Path(rel.replace("\\", "/")).suffix.lower()
+    return MAX_BINARY_BYTES if suffix in BINARY_EXTS else MAX_FILE_BYTES
 
 
 def workspace(agent_id: str, job_id: str) -> Path:
@@ -37,24 +45,47 @@ def resolve(ws: Path, rel: str) -> Path:
 def write_file(ws: Path, rel: str, content: str) -> str:
     import local as _local
 
-    return write_bytes(ws, rel, _local.tidy_site_file(rel, content or "").encode("utf-8"))
+    blob = content or ""
+    parts = _local.split_labeled_dump(blob)
+    if len(parts) >= 2:
+        written = rel
+        wanted = rel.replace("\\", "/").lower()
+        base = Path(rel).name.lower()
+        hit = False
+        for name, body in parts:
+            tidy = _local.tidy_site_file(name, body)
+            path = write_bytes(ws, name, tidy.encode("utf-8"))
+            low = name.replace("\\", "/").lower()
+            if low == wanted or Path(name).name.lower() == base:
+                written = path
+                hit = True
+        if not hit:
+            tidy = _local.tidy_site_file(rel, _local.peel_concatenated(rel, blob))
+            written = write_bytes(ws, rel, tidy.encode("utf-8"))
+        return written
+    return write_bytes(ws, rel, _local.tidy_site_file(rel, blob).encode("utf-8"))
 
 
 def write_bytes(ws: Path, rel: str, data: bytes) -> str:
     root = ws.resolve()
     path = resolve(ws, rel)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if len(data) > MAX_FILE_BYTES:
+    if len(data) > max_bytes_for(rel):
         raise ValueError("file too large")
     path.write_bytes(data)
     return str(path.relative_to(root)).replace("\\", "/")
 
 
-def read_file(ws: Path, rel: str) -> str:
+def read_full(ws: Path, rel: str) -> str:
     path = resolve(ws, rel)
     if not path.exists():
         raise FileNotFoundError(rel)
-    return path.read_text(encoding="utf-8", errors="replace")[:80_000]
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def read_file(ws: Path, rel: str) -> str:
+    """Capped read for the model tool. Heal/gap/verify use read_full."""
+    return read_full(ws, rel)[:READ_TOOL_CAP]
 
 
 def list_files(ws: Path) -> list[str]:
