@@ -149,6 +149,38 @@ export type PlantSnapshot = {
   cloud?: PlantSlot;
 };
 
+export type BrainRepo = {
+  id?: string;
+  label: string;
+  repository?: string;
+  branch?: string;
+};
+
+export type BrainProject = {
+  name: string;
+  included: boolean;
+  id?: string | null;
+  synced_at?: string | null;
+  sync_error?: string | null;
+  repos: BrainRepo[];
+  repo_count: number;
+};
+
+export type BrainSnapshot = {
+  organization: string;
+  wiki_url: string;
+  wiki_md: string;
+  synced_at?: string | null;
+  sync_error?: string | null;
+  poll_enabled: boolean;
+  has_pat?: boolean;
+  studying?: boolean;
+  study_files?: number;
+  study_repos?: number;
+  study_projects?: number;
+  projects: BrainProject[];
+};
+
 export type ProjectRepo = {
   id: string;
   project_id: string;

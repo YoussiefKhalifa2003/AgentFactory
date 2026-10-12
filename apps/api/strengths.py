@@ -76,9 +76,20 @@ def tool_ids() -> set[str]:
     return {row["id"] for row in list_tools()}
 
 
-def pack_body(skill_id: str) -> str:
+def pack_body(skill_id: str, agent_id: str = "") -> str:
     pack = _read_pack(skill_id)
-    return pack["body"] if pack else ""
+    base = pack["body"] if pack else ""
+    if not agent_id:
+        return base
+    try:
+        import coach
+
+        extra = coach.overlay_text(agent_id, skill_id)
+    except Exception:
+        extra = ""
+    if extra:
+        return (base.rstrip() + "\n\n## Desk notes\n" + extra).strip()
+    return base
 
 
 def has_tool(agent: dict[str, Any] | None, name: str) -> bool:

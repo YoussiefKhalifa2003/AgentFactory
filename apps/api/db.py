@@ -25,6 +25,8 @@ PFPS = DATA / "pfps"
 
 _lock = threading.Lock()
 
+BRAIN_ID = "brain"
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -208,8 +210,53 @@ def init_db() -> list[str]:
             CREATE INDEX IF NOT EXISTS idx_jobs_chain ON jobs(chain_id);
             CREATE INDEX IF NOT EXISTS idx_pins_project ON pins(project_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id, created_at);
+            CREATE TABLE IF NOT EXISTS route_stats (
+                strength TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                done INTEGER NOT NULL DEFAULT 0,
+                blocked INTEGER NOT NULL DEFAULT 0,
+                tokens INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (strength, agent_id, model)
+            );
             """
         )
+        _ensure_column(con, "chains", "retry_count", "INTEGER")
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS plant_brain (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                organization TEXT NOT NULL DEFAULT '',
+                wiki_url TEXT NOT NULL DEFAULT '',
+                wiki_md TEXT NOT NULL DEFAULT '',
+                synced_at TEXT,
+                sync_error TEXT,
+                poll_enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS brain_projects (
+                name TEXT PRIMARY KEY,
+                included INTEGER NOT NULL DEFAULT 1,
+                project_id TEXT,
+                azure_id TEXT,
+                repos_json TEXT NOT NULL DEFAULT '[]'
+            );
+            """
+        )
+        _ensure_column(con, "plant_brain", "study_md", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "plant_brain", "studying", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(con, "plant_brain", "study_files", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(con, "plant_brain", "study_repos", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(con, "plant_brain", "study_projects", "INTEGER NOT NULL DEFAULT 0")
+        if not con.execute("SELECT id FROM plant_brain WHERE id=1").fetchone():
+            con.execute(
+                """
+                INSERT INTO plant_brain (
+                    id, organization, wiki_url, wiki_md, synced_at, sync_error, poll_enabled, updated_at
+                ) VALUES (1, '', '', '', NULL, NULL, 1, ?)
+                """,
+                (utcnow(),),
+            )
         con.execute("UPDATE projects SET title = name WHERE title IS NULL OR title = ''")
         con.execute("UPDATE memories SET kind = 'job' WHERE kind IS NULL OR kind = ''")
         for row in con.execute("SELECT id, name, pigment, look FROM agents").fetchall():
@@ -611,7 +658,7 @@ def factory_stats() -> dict[str, Any]:
             }
         )
     feed.sort(key=lambda row: row.get("at") or "", reverse=True)
-    return {
+    payload = {
         "desks": desks,
         "today": feed[:24],
         "totals": {
@@ -620,6 +667,13 @@ def factory_stats() -> dict[str, Any]:
             "blocked": sum(1 for j in jobs if j.get("status") == "blocked"),
         },
     }
+    try:
+        import coach
+
+        payload["routing"] = coach.routing_snapshot()
+    except Exception:
+        payload["routing"] = {"desks": [], "critic_skipped": 0}
+    return payload
 
 
 def add_artifact(
@@ -700,8 +754,8 @@ def failover_models(primary: str) -> list[str]:
     return catalog.failover_chain(primary)
 
 
-def skill_text(strength: str) -> str:
-    return skillset.pack_body(strength)
+def skill_text(strength: str, agent_id: str = "") -> str:
+    return skillset.pack_body(strength, agent_id)
 
 
 def seed_starters() -> None:
@@ -1155,6 +1209,268 @@ def get_project(project_id: str) -> dict[str, Any] | None:
     return data
 
 
+def find_project(organization: str, azure_project: str) -> dict[str, Any] | None:
+    org = (organization or "").strip().lower()
+    name = (azure_project or "").strip().lower()
+    if not org or not name:
+        return None
+    for row in list_projects():
+        if (row.get("organization") or "").strip().lower() != org:
+            continue
+        if (row.get("project") or "").strip().lower() != name:
+            continue
+        return row
+    return None
+
+
+def get_brain() -> dict[str, Any]:
+    con = connect()
+    row = con.execute("SELECT * FROM plant_brain WHERE id=1").fetchone()
+    projects = con.execute("SELECT * FROM brain_projects ORDER BY name").fetchall()
+    con.close()
+    data = dict(row) if row else {
+        "id": 1,
+        "organization": "",
+        "wiki_url": "",
+        "wiki_md": "",
+        "study_md": "",
+        "studying": 0,
+        "study_files": 0,
+        "study_repos": 0,
+        "study_projects": 0,
+        "synced_at": None,
+        "sync_error": None,
+        "poll_enabled": 1,
+        "updated_at": utcnow(),
+    }
+    data["poll_enabled"] = bool(data.get("poll_enabled", 1))
+    data["studying"] = bool(data.get("studying", 0))
+    data["study_md"] = data.get("study_md") or ""
+    data["study_files"] = int(data.get("study_files") or 0)
+    data["study_repos"] = int(data.get("study_repos") or 0)
+    data["study_projects"] = int(data.get("study_projects") or 0)
+    data["projects"] = []
+    for item in projects:
+        entry = dict(item)
+        entry["included"] = bool(entry.get("included", 1))
+        try:
+            entry["repos"] = json.loads(entry.get("repos_json") or "[]")
+        except json.JSONDecodeError:
+            entry["repos"] = []
+        data["projects"].append(entry)
+    return data
+
+
+def put_brain(**fields: Any) -> dict[str, Any]:
+    allowed = {
+        "organization",
+        "wiki_url",
+        "wiki_md",
+        "study_md",
+        "studying",
+        "study_files",
+        "study_repos",
+        "study_projects",
+        "synced_at",
+        "sync_error",
+        "poll_enabled",
+    }
+    payload = {k: v for k, v in fields.items() if k in allowed}
+    if "poll_enabled" in payload:
+        payload["poll_enabled"] = 1 if payload["poll_enabled"] else 0
+    if "studying" in payload:
+        payload["studying"] = 1 if payload["studying"] else 0
+    payload["updated_at"] = utcnow()
+    keys = ", ".join(f"{k}=?" for k in payload)
+    vals = list(payload.values())
+    with _lock:
+        con = connect()
+        exists = con.execute("SELECT id FROM plant_brain WHERE id=1").fetchone()
+        if not exists:
+            con.execute(
+                """
+                INSERT INTO plant_brain (
+                    id, organization, wiki_url, wiki_md, synced_at, sync_error, poll_enabled, updated_at
+                ) VALUES (1, '', '', '', NULL, NULL, 1, ?)
+                """,
+                (payload["updated_at"],),
+            )
+        con.execute(f"UPDATE plant_brain SET {keys} WHERE id=1", vals)
+        con.commit()
+        con.close()
+    return get_brain()
+
+
+def replace_brain_projects(
+    rows: list[dict[str, Any]],
+    *,
+    default_included: bool = True,
+) -> None:
+    with _lock:
+        con = connect()
+        existing = {
+            str(r["name"]): dict(r)
+            for r in con.execute("SELECT * FROM brain_projects").fetchall()
+        }
+        con.execute("DELETE FROM brain_projects")
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            prev = existing.get(name) or {}
+            included = row.get("included")
+            if included is None:
+                included = prev.get("included", 1 if default_included else 0)
+            repos = row.get("repos")
+            if repos is None:
+                try:
+                    repos = json.loads(prev.get("repos_json") or "[]")
+                except json.JSONDecodeError:
+                    repos = []
+            con.execute(
+                """
+                INSERT INTO brain_projects (name, included, project_id, azure_id, repos_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    1 if included else 0,
+                    row.get("project_id") or prev.get("project_id"),
+                    row.get("azure_id") or prev.get("azure_id"),
+                    json.dumps(repos or []),
+                ),
+            )
+        con.commit()
+        con.close()
+
+
+def set_brain_project_ids(mapping: dict[str, str]) -> None:
+    if not mapping:
+        return
+    with _lock:
+        con = connect()
+        for name, project_id in mapping.items():
+            con.execute(
+                "UPDATE brain_projects SET project_id=? WHERE name=?",
+                (project_id, name),
+            )
+        con.commit()
+        con.close()
+
+
+def set_brain_included(names: list[str] | None) -> None:
+    wanted = {n.strip() for n in (names or []) if n and n.strip()}
+    with _lock:
+        con = connect()
+        if names is None:
+            con.close()
+            return
+        rows = con.execute("SELECT name FROM brain_projects").fetchall()
+        for row in rows:
+            con.execute(
+                "UPDATE brain_projects SET included=? WHERE name=?",
+                (1 if row["name"] in wanted else 0, row["name"]),
+            )
+        con.commit()
+        con.close()
+
+
+def list_brain_projects(included_only: bool = False) -> list[dict[str, Any]]:
+    con = connect()
+    sql = "SELECT * FROM brain_projects"
+    if included_only:
+        sql += " WHERE included=1"
+    sql += " ORDER BY name"
+    rows = con.execute(sql).fetchall()
+    con.close()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["included"] = bool(item.get("included", 1))
+        try:
+            item["repos"] = json.loads(item.get("repos_json") or "[]")
+        except json.JSONDecodeError:
+            item["repos"] = []
+        out.append(item)
+    return out
+
+
+def brain_included_project_ids() -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for row in list_brain_projects(included_only=True):
+        pid = str(row.get("project_id") or "")
+        if pid and pid not in seen:
+            seen.add(pid)
+            ids.append(pid)
+    return ids
+
+
+def brain_ready() -> bool:
+    row = get_brain()
+    if (row.get("wiki_md") or "").strip():
+        return True
+    return bool(list_brain_projects(included_only=True))
+
+
+def get_brain_public() -> dict[str, Any]:
+    row = get_brain()
+    projects = []
+    for item in row.get("projects") or []:
+        linked = get_project(str(item.get("project_id") or "")) if item.get("project_id") else None
+        repos = []
+        if linked:
+            for repo in linked.get("repos") or []:
+                repos.append(
+                    {
+                        "id": repo.get("id"),
+                        "label": repo.get("label") or repo.get("repository"),
+                        "repository": repo.get("repository"),
+                        "branch": repo.get("branch") or "main",
+                    }
+                )
+        elif item.get("repos"):
+            for repo in item["repos"]:
+                if isinstance(repo, dict):
+                    repos.append(
+                        {
+                            "label": repo.get("name") or repo.get("label") or "app",
+                            "repository": repo.get("name") or repo.get("repository") or "",
+                            "branch": repo.get("defaultBranch") or repo.get("branch") or "main",
+                        }
+                    )
+        projects.append(
+            {
+                "name": item.get("name"),
+                "included": bool(item.get("included")),
+                "id": item.get("project_id"),
+                "synced_at": (linked or {}).get("synced_at"),
+                "sync_error": (linked or {}).get("sync_error"),
+                "repos": repos,
+                "repo_count": len(repos),
+            }
+        )
+    try:
+        import repos as code
+        has_pat = bool(code.has_pat())
+    except Exception:
+        has_pat = False
+    return {
+        "organization": row.get("organization") or "",
+        "wiki_url": row.get("wiki_url") or "",
+        "wiki_md": row.get("wiki_md") or "",
+        "synced_at": row.get("synced_at"),
+        "sync_error": row.get("sync_error"),
+        "poll_enabled": bool(row.get("poll_enabled", True)),
+        "has_pat": has_pat,
+        "studying": bool(row.get("studying")),
+        "study_files": int(row.get("study_files") or 0),
+        "study_repos": int(row.get("study_repos") or 0),
+        "study_projects": int(row.get("study_projects") or 0),
+        "projects": projects,
+    }
+
+
 def list_projects() -> list[dict[str, Any]]:
     con = connect()
     rows = con.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
@@ -1453,6 +1769,83 @@ def step_for_job(job_id: str) -> dict[str, Any] | None:
     row = con.execute("SELECT * FROM chain_steps WHERE job_id=?", (job_id,)).fetchone()
     con.close()
     return dict(row) if row else None
+
+
+def append_chain_step(chain_id: str, step: dict[str, Any]) -> dict[str, Any] | None:
+    chain = get_chain(chain_id)
+    if not chain:
+        return None
+    seq = len(chain.get("steps") or []) + 1
+    now = utcnow()
+    with _lock:
+        con = connect()
+        con.execute(
+            """
+            INSERT INTO chain_steps (
+                id, chain_id, seq, agent_id, strength, prompt, depends_on, inherit, job_id, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                chain_id,
+                seq,
+                step.get("agent_id"),
+                step.get("strength") or "ops",
+                step.get("prompt") or "",
+                step.get("depends_on"),
+                1 if step.get("inherit", True) else 0,
+                now,
+            ),
+        )
+        con.commit()
+        con.close()
+    return get_chain(chain_id)
+
+
+def bump_route_stat(strength: str, agent_id: str, model: str, status: str, tokens: int = 0) -> None:
+    now_done = 1 if status == "done" else 0
+    now_blocked = 1 if status == "blocked" else 0
+    with _lock:
+        con = connect()
+        con.execute(
+            """
+            INSERT INTO route_stats (strength, agent_id, model, done, blocked, tokens)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(strength, agent_id, model) DO UPDATE SET
+                done = done + excluded.done,
+                blocked = blocked + excluded.blocked,
+                tokens = tokens + excluded.tokens
+            """,
+            (strength or "ops", agent_id, model or "", now_done, now_blocked, int(tokens or 0)),
+        )
+        con.commit()
+        con.close()
+
+
+def list_route_stats(agent_id: str | None = None, strength: str | None = None) -> list[dict[str, Any]]:
+    con = connect()
+    sql = "SELECT * FROM route_stats WHERE 1=1"
+    args: list[Any] = []
+    if agent_id:
+        sql += " AND agent_id=?"
+        args.append(agent_id)
+    if strength:
+        sql += " AND strength=?"
+        args.append(strength)
+    rows = con.execute(sql, args).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+def clear_route_stats(agent_id: str | None) -> None:
+    with _lock:
+        con = connect()
+        if agent_id:
+            con.execute("DELETE FROM route_stats WHERE agent_id=?", (agent_id,))
+        else:
+            con.execute("DELETE FROM route_stats")
+        con.commit()
+        con.close()
 
 
 def list_pins(limit: int = 24) -> list[dict[str, Any]]:

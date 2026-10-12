@@ -33,7 +33,10 @@ export function CrewStrip() {
                     />
                   )}
                   <span className="text-xs">
-                    {agent?.name || step.strength} {done ? "✓" : on ? `· ${step.seq}/${chain.steps.length}` : ""}
+                    {(step.prompt || "").includes("You are the critic")
+                      ? `${agent?.name || "Critic"} · critic`
+                      : agent?.name || step.strength}{" "}
+                    {done ? "✓" : on ? `· ${step.seq}/${chain.steps.length}` : ""}
                   </span>
                 </div>
               </div>

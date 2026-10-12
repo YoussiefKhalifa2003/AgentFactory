@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Mic } from "lucide-react";
 import { FactoryProvider, useFactory } from "@/lib/factory";
 import { Strength } from "@/lib/types";
 import { Floor } from "./Floor";
@@ -14,6 +15,10 @@ import { ToastHost } from "./ui/Toast";
 import { CommandPalette } from "./CommandPalette";
 import { Insights } from "./Insights";
 import { ResultsGallery } from "./ResultsGallery";
+import { BrainOverlay } from "./BrainOverlay";
+import { parseVoiceCommand, resolveMeetingListId, speechAvailable, startListen } from "@/lib/voice";
+import { pickBestAgent } from "@/lib/tasks";
+import { API_URL } from "@/lib/types";
 
 function Shell() {
   const {
@@ -32,18 +37,27 @@ function Shell() {
     setPaletteOpen,
     setInsightsOpen,
     setGalleryOpen,
+    setBrainOpen,
     plant,
     quality,
     setQuality,
+    assignWork,
+    live,
   } = useFactory();
   const [dragStrength, setDragStrength] = useState<Strength | null>(null);
   const [pane, setPane] = useState<"lists" | "floor" | "desk">("floor");
+  const [listening, setListening] = useState(false);
+  const [voiceOn, setVoiceOn] = useState(false);
   const selected = agents.find((a) => a.id === selectedId) || agents[0];
   const view = stageOpen ? (stageMode === "desk" ? "desk3d" : "office") : "floor";
 
   useEffect(() => {
     if (plant?.local?.busy && quality === "high") setQuality("medium");
   }, [plant?.local?.busy, quality, setQuality]);
+
+  useEffect(() => {
+    setVoiceOn(speechAvailable());
+  }, []);
 
   useEffect(() => {
     if (typeof Notification === "undefined") return;
@@ -94,7 +108,45 @@ function Shell() {
             </div>
           </div>
           <div className="flex shrink-0 flex-nowrap items-center gap-1.5 sm:gap-2">
+            {voiceOn && (
+              <button
+                type="button"
+                className={`btn btn-compact ${listening ? "btn-solid" : ""}`}
+                aria-label="Hold to talk"
+                onPointerDown={() => {
+                  setListening(true);
+                  startListen({
+                    onFinal: (text) => {
+                      const intent = parseVoiceCommand(text, agents);
+                      if (intent.action === "cancel") {
+                        const target = intent.agentName
+                          ? agents.find((a) => a.name.toLowerCase() === intent.agentName.toLowerCase())
+                          : agents.find((a) => a.id === selectedId);
+                        const job = target ? live[target.id]?.job : null;
+                        if (job?.id) fetch(`${API_URL}/api/jobs/${job.id}/cancel`, { method: "POST" });
+                        return;
+                      }
+                      if (intent.action === "assign" && intent.text) {
+                        const best = intent.agentId
+                          ? agents.find((a) => a.id === intent.agentId)
+                          : pickBestAgent(agents, "coding");
+                        resolveMeetingListId(API_URL, intent.meeting).then((listId) => {
+                          if (best) assignWork({ agentId: best.id, text: intent.text, listId }).catch(() => undefined);
+                        });
+                      }
+                    },
+                    onEnd: () => setListening(false),
+                  });
+                }}
+                onPointerUp={() => setListening(false)}
+              >
+                <Mic size={14} />
+              </button>
+            )}
             <PlantPanel />
+            <button type="button" className="btn btn-compact" onClick={() => setBrainOpen(true)}>
+              Brain
+            </button>
             <button type="button" className="btn btn-compact" onClick={() => setInsightsOpen(true)}>
               Insights
             </button>
@@ -160,6 +212,7 @@ function Shell() {
       </div>
       {preview && <FilePreview jobId={preview.jobId} file={preview.file} onClose={closePreview} />}
       <CommandPalette />
+      <BrainOverlay />
       <Insights />
       <ResultsGallery />
       <ToastHost />

@@ -17,12 +17,15 @@ import {
   Job,
   LiveState,
   PinCard,
+  BrainSnapshot,
   PlantSnapshot,
   SceneQuality,
   ShiftNote,
   TraceEvent,
   WS_URL,
 } from "./types";
+import { speak } from "./voice";
+import { warmupModels } from "./models";
 
 type AssignArgs = {
   itemId?: string;
@@ -30,6 +33,7 @@ type AssignArgs = {
   text?: string;
   listId?: string;
   foreman?: boolean;
+  files?: File[];
   chain?: { agent_id?: string; strength: string; prompt?: string; depends_on?: number | null; inherit?: boolean }[];
 };
 
@@ -65,6 +69,8 @@ type FactoryContextValue = {
   paletteOpen: boolean;
   insightsOpen: boolean;
   galleryOpen: boolean;
+  brainOpen: boolean;
+  brain: BrainSnapshot | null;
   setOpenListId: (id: string) => void;
   select: (id: string | null) => void;
   openStage: (id: string) => void;
@@ -78,6 +84,7 @@ type FactoryContextValue = {
   setPaletteOpen: (open: boolean) => void;
   setInsightsOpen: (open: boolean) => void;
   setGalleryOpen: (open: boolean) => void;
+  setBrainOpen: (open: boolean) => void;
   submitJob: (agentId: string, prompt: string) => void;
   assignWork: (args: AssignArgs) => Promise<{ queued?: boolean; agent?: Agent; job?: Job } | void>;
   deleteAgent: (agentId: string) => Promise<void>;
@@ -115,10 +122,20 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [galleryOpen, setGalleryOpen] = useState(false);
+  const [brainOpen, setBrainOpen] = useState(false);
+  const [brain, setBrain] = useState<BrainSnapshot | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).get("shot") === "brain") {
+      setBrainOpen(true);
+    }
+  }, []);
   const wsRef = useRef<WebSocket | null>(null);
   const seenChains = useRef<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
+    warmupModels();
     try {
       const [ar, jr] = await Promise.all([
         fetch(`${API_URL}/api/agents`),
@@ -190,12 +207,17 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       }
     };
     tick();
-    const timer = window.setInterval(tick, 4000);
+    if (connected) {
+      return () => {
+        stop = true;
+      };
+    }
+    const timer = window.setInterval(tick, 15000);
     return () => {
       stop = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [connected]);
 
   useEffect(() => {
     for (const job of jobs) {
@@ -328,6 +350,9 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
           if (msg.plant && typeof msg.plant === "object") {
             setPlant(msg.plant as PlantSnapshot);
           }
+          if (msg.brain && typeof msg.brain === "object") {
+            setBrain(msg.brain as BrainSnapshot);
+          }
           setLive((prev) => {
             if (!incoming.length) return prev;
             const next = { ...prev };
@@ -402,6 +427,11 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
             )
           );
           if (status === "done") refreshShowroom().catch(() => undefined);
+          if (status === "done") {
+            const out = String(msg.output || "");
+            const prompt = String(msg.prompt || "");
+            if (out && out !== "Done" && !/you are the critic/i.test(prompt)) speak(out);
+          }
           setTaskTick((n) => n + 1);
           if (status === "done" || status === "blocked") {
             const name = String(msg.agentName || msg.caption || "Desk");
@@ -475,6 +505,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
               )
             );
           }
+        } else if (msg.type === "brain.updated" && msg.brain && typeof msg.brain === "object") {
+          setBrain(msg.brain as BrainSnapshot);
         } else if (msg.type === "plant" && msg.plant && typeof msg.plant === "object") {
           setPlant(msg.plant as PlantSnapshot);
         } else if (msg.type === "chain.updated" && msg.chain) {
@@ -583,18 +615,31 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
   const assignWork = useCallback(async (args: AssignArgs) => {
     const agentId = args.agentId;
     if (agentId) setSelectedId(agentId);
-    const r = await fetch(`${API_URL}/api/assign`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        item_id: args.itemId || null,
-        agent_id: args.agentId || null,
-        text: args.text || null,
-        list_id: args.listId || null,
-        foreman: args.foreman || false,
-        chain: args.chain || null,
-      }),
-    });
+    let r: Response;
+    if (args.files && args.files.length) {
+      const form = new FormData();
+      if (args.itemId) form.append("item_id", args.itemId);
+      if (args.agentId) form.append("agent_id", args.agentId);
+      if (args.text) form.append("text", args.text);
+      if (args.listId) form.append("list_id", args.listId);
+      if (args.foreman) form.append("foreman", "true");
+      if (args.chain) form.append("chain", JSON.stringify(args.chain));
+      for (const file of args.files) form.append("files", file);
+      r = await fetch(`${API_URL}/api/assign`, { method: "POST", body: form });
+    } else {
+      r = await fetch(`${API_URL}/api/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          item_id: args.itemId || null,
+          agent_id: args.agentId || null,
+          text: args.text || null,
+          list_id: args.listId || null,
+          foreman: args.foreman || false,
+          chain: args.chain || null,
+        }),
+      });
+    }
     if (!r.ok) {
       throw new Error((await r.text()) || "Could not assign");
     }
@@ -647,6 +692,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       paletteOpen,
       insightsOpen,
       galleryOpen,
+      brainOpen,
+      brain,
       setOpenListId,
       select: setSelectedId,
       openStage: (id: string) => {
@@ -673,6 +720,7 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       setPaletteOpen,
       setInsightsOpen,
       setGalleryOpen,
+      setBrainOpen,
       submitJob,
       assignWork,
       deleteAgent,
@@ -703,6 +751,8 @@ export function FactoryProvider({ children }: { children: React.ReactNode }) {
       paletteOpen,
       insightsOpen,
       galleryOpen,
+      brainOpen,
+      brain,
       submitJob,
       assignWork,
       deleteAgent,

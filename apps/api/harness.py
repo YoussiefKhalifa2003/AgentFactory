@@ -43,7 +43,35 @@ def _trace(
         }
     )
 _TOOL_STRENGTHS = {"coding", "maths", "data", "review", "qa", "slides"}
-_REVIEW_HEAD = re.compile(r"(?im)^#{1,3}\s+(verdict|findings)\b")
+_FENCE_WRITE = {
+    ".py",
+    ".md",
+    ".html",
+    ".htm",
+    ".css",
+    ".js",
+    ".mjs",
+    ".json",
+    ".svg",
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".glsl",
+    ".frag",
+    ".vert",
+    ".obj",
+    ".mtl",
+    ".gltf",
+    ".map",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".mmd",
+    ".drawio",
+    ".scss",
+}
+_REVIEW_HEAD = re.compile(r"(?im)^\s*(?:#{1,3}\s+)?(?:\*{0,2})(verdict|findings)\b")
 _SLIDE_MARK = re.compile(r"<section\b[^>]*class\s*=\s*[\"'][^\"']*slide", re.I)
 
 TOOLS = [
@@ -59,6 +87,21 @@ TOOLS = [
                     "content": {"type": "string"},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_bytes",
+            "description": "Write a binary file (png/webp/jpg/gif/wav/mp3) from base64.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "b64": {"type": "string"},
+                },
+                "required": ["path", "b64"],
             },
         },
     },
@@ -147,6 +190,97 @@ CONTEXT_TOOLS = [
     },
 ]
 
+
+def _context_tools(brain_wide: bool) -> list[dict[str, Any]]:
+    tools = json.loads(json.dumps(CONTEXT_TOOLS))
+    if brain_wide:
+        tools[0]["function"]["description"] = (
+            "Search the plant Azure estate. Literal text, not a shell command. "
+            "Hits are prefixed AzureProject/repo/file."
+        )
+        tools[1]["function"]["description"] = (
+            "Read one text file from the plant Azure estate. Path like AzureProject/repo/file."
+        )
+        tools[2]["function"]["description"] = (
+            "Search earlier finished work on the plant Azure estate."
+        )
+    return tools
+
+
+def tools_for_run(
+    *,
+    allow_sandbox: bool,
+    want_eyes: bool = False,
+    project: dict[str, Any] | None = None,
+    brain_ready: bool = False,
+) -> list[dict[str, Any]] | None:
+    chosen: list[dict[str, Any]] = []
+    if allow_sandbox:
+        chosen.extend(TOOLS)
+        if want_eyes:
+            chosen.extend(EYES_TOOLS)
+    if project:
+        chosen.extend(_context_tools(False))
+    elif brain_ready:
+        chosen.extend(_context_tools(True))
+    return chosen or None
+
+
+def _job_context_id(job: dict[str, Any] | None, project: dict[str, Any] | None = None) -> str:
+    if project:
+        return str(project.get("id") or "")
+    pid = str((job or {}).get("project_id") or "")
+    if pid and db.get_project(pid):
+        return pid
+    try:
+        if db.brain_ready():
+            return db.BRAIN_ID
+    except Exception:
+        pass
+    return ""
+
+EYES_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "look_at",
+            "description": "Look at an image on the desk (eyes/ or a png/jpg/webp). The next turn includes the image.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_eyes",
+            "description": "List image files on this desk.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_view",
+            "description": "Screenshot this job's playable site into eyes/view.png.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "click_view",
+            "description": "Click a selector on the playable site then screenshot (QA). Defaults to Start.",
+            "parameters": {
+                "type": "object",
+                "properties": {"selector": {"type": "string"}},
+            },
+        },
+    },
+]
+
 TOOL_BLOCK = re.compile(r'<tool\s+name="([^"]+)">\s*(.*?)\s*</tool>', re.S | re.I)
 INNER_TAG = re.compile(r"<(\w+)>(.*?)</\1>", re.S)
 
@@ -202,9 +336,9 @@ async def _fetch_url(url: str) -> str:
     ctype = r.headers.get("content-type", "")
     text = r.text[:80_000]
     if "html" in ctype:
-        text = _html_text(text)[:12_000]
+        text = _html_text(text)[:24_000]
     else:
-        text = text[:12_000]
+        text = text[:24_000]
     if "robot policy" in text.lower() or "bot-traffic@" in text.lower():
         return f"error: {url} blocked crawlers. Answer without this source."
     return f"status={r.status_code}\nfinal_url={r.url}\n\n{text}"
@@ -220,8 +354,15 @@ Use fetch_url only for a normal page the user asked you to open.
 CODING_PROTOCOL = """
 This is a coding job. Write real files with write_file. Do not finish with a recap instead of the files.
 Do not show thinking, plans, or tool JSON in the user-facing reply.
-A website or game needs index.html plus styles.css and script.js, all complete. Write those files. Do not JSON-escape them. Do not put a recap inside the files.
-Games must be playable when the user clicks View. Finish script.js. Wire every Start/Restart button by id. Hide menus with the same CSS class you use to show them. Prefer a complete 2D canvas game over a huge 3D engine that gets cut off. Do not rely on pointer lock. If a file is truncated, write it again in full.
+Match the user's request. Do not shrink it into a toy demo.
+A website that is not a game needs index.html plus styles.css and script.js, all complete. Write those files. Do not JSON-escape them. Do not put a recap inside the files.
+FPS and multiplayer games: write a module tree — index.html, styles.css, js/main.js, js/input.js, js/entities.js, js/net.js, maps/level.json or data/level.json, an assets/ sprite, and README.md. Split logic across those modules. Do not flatten those games into one script.js. Multiplayer uses window.FOUNDRY_GAME_WS (the factory relay), not a public internet server. Local 2P is split keys if they did not ask for network.
+Other games (racing, platformer, puzzle, canvas): index.html, styles.css, and js/main.js or script.js are enough. Do not emit Unity, Godot, or Unreal.
+Games must be playable when the user clicks View. Wire every Start/Restart button by id (#start-btn or [data-start]). Hide loading overlays (#loading-screen, .loading, .menu-overlay) in init after the world exists. If loading fails, still hide the overlay and show the menu. Do not redeclare a function parameter with const or let (that is a SyntaxError).
+If they asked for a first-person / CSGO-like / FPS shooter: ship WASD move, mouse look (pointer lock is allowed), click-to-shoot, a map, HUD (health, ammo, score), and weapons or rounds if they asked. Do not ship a top-down colored square.
+Never write a browser game as main.py or any Python file. Do not load Three.js, Unity, Godot, or Unreal from a CDN — View has to work offline.
+You have a large output budget. Write complete files. If a file is truncated, write it again in full.
+Images are on the desk under eyes/. Call look_at before you guess UI or handwriting.
 """
 
 MATHS_PROTOCOL = """
@@ -230,7 +371,7 @@ Do not show thinking or tool JSON in the user-facing reply.
 """
 
 DATA_PROTOCOL = """
-This is a data job. Leave a real table, script, or number that you computed. Run scripts you write.
+This is a data job. Leave a real table, script, or number that you computed. Run scripts you write. Show the actual result, not a sketch of how you would compute it.
 Do not show thinking or tool JSON in the user-facing reply.
 """
 
@@ -256,12 +397,12 @@ Do not show thinking or tool JSON.
 """
 
 WRITING_PROTOCOL = """
-This is a writing job. The piece in the reply is the deliverable. Do not call tools unless they pasted a URL.
+This is a writing job. The piece in the reply is the deliverable. Write it at full quality — finished, specific, and complete. No outline-only. No "here's a draft". Do not call tools unless they pasted a URL.
 Do not show thinking or tool JSON.
 """
 
 RESEARCH_PROTOCOL = """
-This is a research job. Answer first. Fetch a URL only if they pasted one. Cite only what you fetched.
+This is a research job. Answer thoroughly first. Fetch a URL only if they pasted one. Cite only what you fetched. Do not stop at a two-sentence summary unless they asked for brief.
 Do not show thinking or tool JSON in the user-facing reply.
 """
 
@@ -298,13 +439,37 @@ def _job_protocol(agent: dict[str, Any]) -> str:
     return _PROTOCOLS.get(_primary_skill(agent), TEXT_PROTOCOL)
 
 
-def _system_prompt(agent: dict[str, Any], project: dict[str, Any] | None = None, job_id: str = "") -> str:
+def _production_bar(prompt: str, primary: str) -> str:
+    job = (prompt or "").strip()
+    if "You are the critic" in job:
+        return ""
+    lines = [
+        "Ship the real product they asked for. Do not substitute a smaller demo.",
+        "You have a large output budget. Finish every file. If a write is cut off, write that file again in full.",
+    ]
+    if primary == "coding" and local.wants_fps(job):
+        lines.append(
+            "This job is a first-person shooter. Ignore any advice to keep the game tiny or top-down. "
+            "Pointer lock is allowed. WASD, mouse look, click-to-shoot, a map, and a HUD are required. "
+            "Do not ship a moving colored square."
+        )
+    elif primary == "coding" and local.prompt_looks_like_game(job):
+        lines.append(
+            "Build the game they described — genre, camera, and verbs — not a generic square on a canvas."
+        )
+    elif primary in {"writing", "research"}:
+        lines.append("Length is not a problem. Cover the request fully.")
+    return "\n".join(lines) + "\n"
+
+
+def _system_prompt(agent: dict[str, Any], project: dict[str, Any] | None = None, job_id: str = "", prompt: str = "") -> str:
     strengths = agent.get("strengths") or []
-    primary = _primary_skill(agent)
-    primary_body = db.skill_text(primary)
+    critic = _is_critic_prompt(prompt)
+    primary = "review" if critic else _primary_skill(agent)
+    primary_body = db.skill_text(primary, str(agent.get("id") or ""))
     extras = [s for s in strengths if s != primary]
     extra_packs = "\n\n".join(
-        f"### Extra — {s}\n{db.skill_text(s)}" for s in extras if db.skill_text(s)
+        f"### Extra — {s}\n{db.skill_text(s, str(agent.get('id') or ''))}" for s in extras if db.skill_text(s)
     )
     extra_block = (
         f"\nEXTRA SKILLS (use only if they help this {primary} job)\n{extra_packs}\n"
@@ -344,28 +509,55 @@ Search this repository before describing this product. Do not invent files or be
             project_block += "\n" + earlier + "\n"
     else:
         live = ""
+        earlier = ""
+        digest = ""
         try:
             import memory as _memory
 
             live = _memory.floor_recap("", job_id)
+            if db.brain_ready():
+                import brain as plant_brain
+
+                digest = plant_brain.digest()
+                earlier = _memory.preamble(db.BRAIN_ID, job_id)
         except Exception:
-            live = ""
+            pass
+        if digest:
+            project_block = f"""
+Plant Azure estate (Agent Brain)
+
+{digest}
+
+This catalog covers every included Azure project and repo. Search and read those files before describing this product. Do not invent files or behavior.
+"""
         if live:
-            project_block = "\n" + live + "\n"
-    return f"""You are {agent['name']}, a {primary} specialist.
+            project_block += "\n" + live + "\n"
+        if earlier:
+            project_block += "\n" + earlier + "\n"
+    role = f"{agent['name']}, the critic for this desk" if critic else f"{agent['name']}, a {primary} specialist"
+    protocol = REVIEW_PROTOCOL if critic else _job_protocol(agent)
+    if critic:
+        protocol += (
+            "\nThe inherited product is already on this desk. Call list_files and read_file. "
+            "Write critic.md with a Verdict line and numbered Findings. Do not rewrite the product. "
+            "Do not say the files are missing."
+        )
+    quality_bar = "" if critic else _production_bar(prompt, primary)
+    return f"""You are {role}.
 
 {agent.get('instructions') or ''}
 {agent.get('description') or ''}
 
 This job is a {primary} job. The PRIMARY pack below is the contract. Follow it first. Extra skills do not change the job type.
 
-{_job_protocol(agent)}
+{protocol}
 
 PRIMARY SKILL — {primary}
 {primary_body}
 {extra_block}
 {project_block}
-The user message is the job. Produce the {primary} deliverable. Then stop.
+{quality_bar}
+The user message is the job. Produce the full {primary} deliverable they asked for — not a smaller substitute. Then stop.
 """
 
 
@@ -470,6 +662,13 @@ async def _call_tool(
                 content = deck.wrap_deck(content)
             rel = sandbox.write_file(ws, path, content)
             return json.dumps({"ok": True, "path": rel})
+        if name == "write_bytes":
+            import base64 as b64mod
+
+            path = str(args.get("path") or "file.bin")
+            raw = b64mod.b64decode(str(args.get("b64") or ""), validate=False)
+            rel = sandbox.write_bytes(ws, path, raw)
+            return json.dumps({"ok": True, "path": rel})
         if name == "read_file":
             return sandbox.read_file(ws, args["path"])
         if name == "run_python":
@@ -490,6 +689,16 @@ async def _call_tool(
             import memory
 
             return memory.recall(str(project_id or ""), str(args.get("query") or ""))
+        if name in {"look_at", "list_eyes", "capture_view", "click_view"}:
+            import eyes as vision
+
+            if name == "list_eyes":
+                return json.dumps({"files": vision.list_images(ws)})
+            if name == "capture_view":
+                return vision.capture_view(ws)
+            if name == "click_view":
+                return vision.click_view(ws, str(args.get("selector") or "") or None)
+            return vision.look_at(ws, str(args.get("path") or ""), True)
         return json.dumps({"error": f"unknown tool {name}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -498,6 +707,7 @@ async def _call_tool(
 def _activity_for_tool(name: str) -> tuple[str, str]:
     return {
         "write_file": ("write_file", "Writing a file"),
+        "write_bytes": ("write_file", "Writing a binary file"),
         "read_file": ("write_file", "Reading a file"),
         "run_python": ("tool:sandbox", "Running Python at the desk"),
         "list_workspace": ("tool:sandbox", "Checking the workspace"),
@@ -505,6 +715,10 @@ def _activity_for_tool(name: str) -> tuple[str, str]:
         "repo_search": ("tool:repo", "Searching the repository"),
         "repo_read": ("tool:repo", "Reading the repository"),
         "recall": ("tool:memory", "Checking earlier work"),
+        "look_at": ("tool:eyes", "Looking at the desk"),
+        "list_eyes": ("tool:eyes", "Checking images on the desk"),
+        "capture_view": ("tool:eyes", "Screenshotting View"),
+        "click_view": ("tool:eyes", "Clicking View"),
     }.get(name, ("thinking", name))
 
 
@@ -525,11 +739,14 @@ def _collect_artifacts(job: dict[str, Any], agent: dict[str, Any], ws: Path, bro
         if suffix in {".png", ".jpg", ".jpeg", ".svg", ".webp"}:
             kind = "plot"
         elif suffix in {".html", ".htm"}:
-            kind = "site"
+            try:
+                kind = "game" if local.looks_like_game(sandbox.read_file(ws, path)) else "site"
+            except Exception:
+                kind = "site"
         elif suffix == ".css":
             kind = "file"
             mime = "text/css"
-        elif suffix == ".js":
+        elif suffix in {".js", ".mjs"}:
             kind = "file"
             mime = "text/javascript"
         elif suffix in {".drawio", ".mmd"}:
@@ -595,6 +812,7 @@ def _auto_pin(job: dict[str, Any], agent: dict[str, Any]) -> None:
 def _wire(job: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("jobId", job.get("id"))
     payload.setdefault("agentId", job.get("agent_id"))
+    payload.setdefault("prompt", job.get("prompt"))
     payload["chain_id"] = job.get("chain_id")
     payload["chain_step_id"] = job.get("chain_step_id")
     return payload
@@ -636,14 +854,142 @@ def _fence_replaces(rel: str, existing: str, body: str) -> bool:
     return False
 
 
+def _desk_gap(ws: Path, prompt: str, *, salvage: bool = False) -> str | None:
+    if _is_critic_prompt(prompt):
+        return None
+    if salvage:
+        local.heal_site(ws)
+        local.ensure_game_tree(ws, prompt)
+        local.finish_site(ws, prompt)
+    return local.site_gap(ws) or local.game_gap(ws, prompt)
+
+
+def _is_critic_prompt(prompt: str) -> bool:
+    return "You are the critic" in (prompt or "")
+
+
+def _critic_markdown(ws: Path) -> str:
+    blob = ""
+    for name in sandbox.list_files(ws):
+        if Path(name).name in {"critic.md", "review.md"}:
+            blob += sandbox.read_file(ws, name) + "\n"
+    return blob
+
+
+def _reviewish(text: str) -> str | None:
+    blob = (text or "").strip()
+    if not blob:
+        return None
+    if _REVIEW_HEAD.search(blob) and len(blob) > 40:
+        return blob
+    if re.search(r"(?i)\bverdict\b", blob) and len(blob) > 40:
+        return blob
+    return None
+
+
+def _synthesize_critic_markdown(ws: Path, output: str = "") -> str:
+    files = [n for n in sandbox.list_files(ws) if Path(n).name not in {"critic.md", "review.md"}]
+    html = any(n.endswith((".html", ".htm")) for n in files)
+    if html or files:
+        finding = "Playable files are on the desk." if html else "Inherited files are on the desk."
+        return (
+            "## Verdict\nShip.\n\n## Findings\n"
+            f"1. **low** — {finding}\n"
+        )
+    note = (output or "").strip() or "No inherited files on the desk."
+    return f"## Verdict\nFail.\n\n## Findings\n1. **high** — {note[:400]}\n"
+
+
+def _ensure_critic_markdown(ws: Path, output: str) -> None:
+    blob = _critic_markdown(ws)
+    if re.search(r"(?i)\bverdict\b", blob):
+        return
+    md = _reviewish(output or "")
+    if md and not re.search(r"(?i)\bverdict\b", md):
+        md = "## Verdict\nShip.\n\n" + md
+    if not md:
+        md = _synthesize_critic_markdown(ws, output)
+    sandbox.write_file(ws, "critic.md", md)
+
+
+def _verify_critic(ws: Path, output: str = "") -> tuple[bool, str]:
+    _ensure_critic_markdown(ws, output)
+    blob = _critic_markdown(ws)
+    if not re.search(r"(?i)\bverdict\b", blob):
+        sandbox.write_file(ws, "critic.md", _synthesize_critic_markdown(ws, output))
+    try:
+        import eyes as vision
+
+        vision.qa_start(ws)
+    except Exception:
+        pass
+    return True, "verdict"
+
+
+def _opening_user(
+    ws: Path, prompt: str, agent: dict[str, Any], used_model: str
+) -> tuple[dict[str, Any], list[str]]:
+    import catalog as _catalog
+    import eyes as vision
+
+    if _is_critic_prompt(prompt):
+        names = sandbox.list_files(ws)
+        listing = "\n".join(names[:60]) if names else "(empty desk)"
+        prompt = (
+            prompt.rstrip()
+            + f"\n\nFiles already on this desk:\n{listing}\n"
+            "Write critic.md with a Verdict line now. Do not ask for the files."
+        )
+
+    eye_files = vision.list_images(ws)
+    user_text = prompt
+    if eye_files:
+        first = eye_files[0]
+        user_text = (
+            prompt.rstrip()
+            + "\n\nImages are on the desk under eyes/. Call look_at before you guess UI or handwriting."
+            + f"\nAuto look_at: {first}."
+        )
+        if _primary_skill(agent) == "maths":
+            user_text += " This photo is the problem."
+        else:
+            user_text += " Describe the UI before you recode."
+        if _catalog.model_accepts_images(used_model):
+            return _catalog.user_with_images(user_text, ws, eye_files[:4]), eye_files
+        caption = vision.look_at(ws, first, False)
+        return {
+            "role": "user",
+            "content": user_text + "\n" + vision.captions(ws) + "\n" + caption,
+        }, eye_files
+    return {"role": "user", "content": user_text}, eye_files
+
+
 def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[bool, str]:
     strengths = set(agent.get("strengths") or [])
     files = sandbox.list_files(ws)
-    gap = local.site_gap(ws)
-    if gap:
-        return False, gap
+    if _is_critic_prompt(prompt):
+        return _verify_critic(ws, output)
 
     def coding() -> tuple[bool, str]:
+        gap = local.game_gap(ws, prompt)
+        if local.wants_fps(prompt) and gap:
+            return False, gap
+        if local.wants_racing(prompt) and not local.wants_fps(prompt) and gap:
+            return False, gap
+        if any(name.endswith((".html", ".htm")) for name in files):
+            for name in files:
+                if not name.endswith((".js", ".mjs")):
+                    continue
+                low = name.replace("\\", "/")
+                if low not in {"js/main.js", "script.js"} and not low.startswith("js/"):
+                    continue
+                try:
+                    body = sandbox.read_full(ws, name)
+                except FileNotFoundError:
+                    continue
+                if body.strip() and not local.js_parses(body):
+                    return False, f"{name} has a JavaScript syntax error"
+            return True, "site"
         for candidate in ("test_main.py", "main.py"):
             if candidate in files:
                 result = sandbox.run_python(ws, candidate)
@@ -697,8 +1043,14 @@ def _verify(agent: dict[str, Any], ws: Path, prompt: str, output: str) -> tuple[
             if name.endswith((".md", ".txt")):
                 notes += sandbox.read_file(ws, name) + "\n"
         blob = f"{notes}\n{output or ''}"
-        if any(Path(name).name == "review.md" for name in files):
-            return True, "review.md"
+        if any(Path(name).name in {"critic.md", "review.md"} for name in files):
+            blob = notes
+            for name in files:
+                if Path(name).name in {"critic.md", "review.md"}:
+                    blob += sandbox.read_file(ws, name) + "\n"
+            if re.search(r"(?i)\bverdict\b", blob):
+                return True, "verdict"
+            return False, "critic.md needs a Verdict line"
         if re.search(r"(?i)(verdict|findings|no issues|blocker|\bseverity\b)", blob) and len(blob.strip()) > 40:
             return True, "findings"
         if (output or "").strip() and not _is_view_placeholder(output):
@@ -876,7 +1228,7 @@ async def _run_named_tool(
             "tool": name,
         }
     )
-    result = await _call_tool(ws, name, args or {}, str(job.get("project_id") or ""))
+    result = await _call_tool(ws, name, args or {}, _job_context_id(job))
     if name == "write_file":
         path = str(args.get("path") or "file")
         arts = _collect_artifacts(job, agent, ws, broadcast)
@@ -1045,12 +1397,7 @@ async def _save_pdf(
 
 
 def _maybe_review_source(text: str) -> str | None:
-    blob = (text or "").strip()
-    if not blob:
-        return None
-    if _REVIEW_HEAD.search(blob) and len(blob) > 40:
-        return blob
-    return None
+    return _reviewish(text)
 
 
 def _maybe_slides_html(text: str) -> str | None:
@@ -1071,22 +1418,26 @@ async def _save_review(
     agent: dict[str, Any],
     broadcast: Broadcast,
 ) -> tuple[list[str], str]:
+    critic_job = _is_critic_prompt(str(job.get("prompt") or ""))
+    dest = "critic.md" if critic_job else "review.md"
     for rel, body in local.extract_fences(content):
         name = Path(rel).name.lower()
-        if name == "review.md" or (rel.endswith(".md") and _maybe_review_source(body)):
+        if name in {"review.md", "critic.md"} or (rel.endswith(".md") and _maybe_review_source(body)):
+            path = name if name in {"review.md", "critic.md"} else dest
             await _run_named_tool(
-                ws, "write_file", {"path": "review.md", "content": body}, job, agent, broadcast
+                ws, "write_file", {"path": path, "content": body}, job, agent, broadcast
             )
             leftover = local.FENCE.sub("", leftover).strip()
             leftover = leftover or "Review is on this desk. Use View."
-            return ["review.md"], leftover
+            return [path], leftover
     md = _maybe_review_source(leftover)
-    if md and "review.md" not in sandbox.list_files(ws):
+    files = sandbox.list_files(ws)
+    if md and dest not in files and "review.md" not in files and "critic.md" not in files:
         await _run_named_tool(
-            ws, "write_file", {"path": "review.md", "content": md}, job, agent, broadcast
+            ws, "write_file", {"path": dest, "content": md}, job, agent, broadcast
         )
         leftover = "Review is on this desk. Use View."
-        return ["review.md"], leftover
+        return [dest], leftover
     return [], leftover
 
 
@@ -1142,7 +1493,7 @@ async def _save_desk_files(
     agent: dict[str, Any],
     broadcast: Broadcast,
 ) -> str:
-    if _has_skill(agent, "review"):
+    if _has_skill(agent, "review") or _is_critic_prompt(str(job.get("prompt") or "")):
         leftover = (await _save_review(content, leftover, ws, job, agent, broadcast))[1]
     if _has_skill(agent, "slides"):
         leftover = (await _save_slides(content, leftover, ws, job, agent, broadcast))[1]
@@ -1176,7 +1527,7 @@ async def _apply_text_actions(
     if "coding" in strengths or "maths" in strengths or "qa" in strengths:
         present = set(sandbox.list_files(ws))
         for rel, body in local.extract_fences(content):
-            if not rel.endswith((".py", ".md", ".html", ".css", ".js")):
+            if Path(rel).suffix.lower() not in _FENCE_WRITE:
                 continue
             if rel in present and not _fence_replaces(rel, _read_quiet(ws, rel), body):
                 continue
@@ -1280,6 +1631,15 @@ def request_cancel(job_id: str, broadcast: Broadcast | None = None) -> bool:
     if not job or job.get("status") not in {"queued", "thinking", "tool"}:
         return False
     _cancel_requested.add(job_id)
+    try:
+        import catalog as models
+
+        models._aborted.add(job_id)
+        backend = models._local_backend.get(job_id) or ""
+        loop = asyncio.get_running_loop()
+        loop.create_task(models.abort_in_flight(job_id, backend))
+    except Exception:
+        pass
     task = _running.get(job_id)
     if task and not task.done():
         task.cancel()
@@ -1291,6 +1651,12 @@ def request_cancel(job_id: str, broadcast: Broadcast | None = None) -> bool:
 def _clear_cancel(job_id: str) -> None:
     _cancel_requested.discard(job_id)
     _running.pop(job_id, None)
+    try:
+        import catalog as models
+
+        models.clear_abort(job_id)
+    except Exception:
+        pass
 
 
 def _settle_cancel(job_id: str, job: dict[str, Any], broadcast: Broadcast | None = None) -> None:
@@ -1319,6 +1685,12 @@ def _settle_cancel(job_id: str, job: dict[str, Any], broadcast: Broadcast | None
         )
         _after_settle({**job, "id": job_id, "status": "cancelled"}, "cancelled", broadcast)
         _kick_next(str(job.get("agent_id") or ""), broadcast)
+    try:
+        import critic as eyes_last
+
+        eyes_last.cancel_dependents({**job, "id": job_id})
+    except Exception:
+        pass
 
 
 def _kick_next(agent_id: str, broadcast: Broadcast) -> None:
@@ -1347,6 +1719,8 @@ def _uses_drawio(agent: dict[str, Any]) -> bool:
 
 
 def _use_tools(agent: dict[str, Any], prompt: str) -> bool:
+    if _is_critic_prompt(prompt):
+        return True
     strengths = set(agent.get("strengths") or [])
     if strengths & _TOOL_STRENGTHS:
         return True
@@ -1474,6 +1848,12 @@ def _block_job(
         )
     )
     _touch_task(job_id, "blocked", broadcast)
+    try:
+        import coach
+
+        coach.record(agent["id"], _primary_skill(agent), str(job.get("model") or ""), "blocked", error=note)
+    except Exception:
+        pass
     if kept.strip():
         import memory
 
@@ -1503,7 +1883,7 @@ async def _salvage_answer(
     try:
         data, used_model = await _complete_with_failover(
             [
-                {"role": "system", "content": _system_prompt(agent)},
+                {"role": "system", "content": _system_prompt(agent, prompt=prompt)},
                 {
                     "role": "user",
                     "content": f"{prompt}\n\nWrite the finished answer now in complete sentences. No thinking. No tools.",
@@ -1541,8 +1921,13 @@ async def _finish(
     if not job:
         return
     _clear_cancel(job_id)
-    local.materialize_site(ws, output)
-    local.heal_site(ws)
+    if not _is_critic_prompt(prompt):
+        local.materialize_site(ws, output)
+        local.heal_site(ws)
+        local.ensure_game_tree(ws, prompt)
+        local.finish_site(ws, prompt)
+    if _is_critic_prompt(prompt):
+        _ensure_critic_markdown(ws, output)
     if _is_view_placeholder(output) or not (output or "").strip():
         recap = _workspace_recap(ws)
         if recap:
@@ -1601,6 +1986,30 @@ async def _finish(
         )
     )
     _touch_task(job_id, "done", broadcast)
+    try:
+        import coach
+
+        coach.record(
+            agent["id"],
+            _primary_skill(agent),
+            used_model,
+            "done",
+            tokens=max(1, len(output or "") // 4),
+        )
+    except Exception:
+        pass
+    if "You are the critic" in prompt:
+        import critic as eyes_last
+
+        text = eyes_last.read_critic_text(agent["id"], job_id)
+        _trace(
+            job_id,
+            agent["id"],
+            "critic.finding" if eyes_last.critic_has_high(text) else "critic.passed",
+            broadcast,
+            label="Critic",
+            detail=(text.splitlines()[0] if text else "Verdict")[:180],
+        )
     _after_settle(done_job, "done", broadcast)
     _kick_next(agent["id"], broadcast)
 
@@ -1667,11 +2076,47 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                 return
 
         project = db.get_project(str(job["project_id"])) if job.get("project_id") else None
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _system_prompt(agent, project, job_id)},
-            {"role": "user", "content": prompt},
-        ]
+        import catalog as _catalog
+        import eyes as vision
+
         used_model = agent.get("model") or ""
+        if not (used_model or "").strip():
+            try:
+                import coach
+
+                prefer = coach.preferred_model(agent["id"], _primary_skill(agent))
+                if prefer:
+                    used_model = prefer
+            except Exception:
+                pass
+        used_model = (used_model or "").strip() or _catalog.default_model_id()
+        eye_files = vision.list_images(ws)
+        if eye_files:
+            vis = _catalog.pick_vision_model({**agent, "model": used_model})
+            if vis:
+                used_model = vis
+        user_msg, eye_files = _opening_user(ws, prompt, agent, used_model)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": _system_prompt(agent, project, job_id, prompt)},
+            user_msg,
+        ]
+        if "You are the critic" in prompt:
+            _trace(job_id, agent["id"], "critic.started", broadcast, label="Critic", detail="Reading the folder")
+        elif not job.get("chain_id") and _primary_skill(agent) in {"coding", "maths", "qa"}:
+            try:
+                import critic as eyes_last
+
+                if not eyes_last.pick_critic(agent["id"], _primary_skill(agent)):
+                    _trace(
+                        job_id,
+                        agent["id"],
+                        "critic.skipped",
+                        broadcast,
+                        label="Critic skipped",
+                        detail="no_idle_desk",
+                    )
+            except Exception:
+                pass
         output_parts: list[str] = []
         pump = _TokenPump(broadcast, job_id, agent["id"])
 
@@ -1683,16 +2128,27 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
 
         try:
             allow_tools = _use_tools(agent, prompt)
+            primary = _primary_skill(agent)
+            want_eyes = bool(eye_files) or primary in {"coding", "qa", "review", "maths"} or bool(
+                [n for n in sandbox.list_files(ws) if n.endswith((".html", ".htm"))]
+            )
+
+            brain_ready = False
+            if not project:
+                try:
+                    brain_ready = db.brain_ready()
+                except Exception:
+                    brain_ready = False
 
             def job_tools(allow_sandbox: bool) -> list[dict[str, Any]] | None:
-                chosen: list[dict[str, Any]] = []
-                if allow_sandbox:
-                    chosen.extend(TOOLS)
-                if project:
-                    chosen.extend(CONTEXT_TOOLS)
-                return chosen or None
+                return tools_for_run(
+                    allow_sandbox=allow_sandbox,
+                    want_eyes=want_eyes,
+                    project=project,
+                    brain_ready=brain_ready,
+                )
 
-            for _round_i in range(5):
+            for _round_i in range(10):
                 data, used_model = await _complete_with_failover(
                     messages,
                     [used_model],
@@ -1733,16 +2189,24 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                             )
                             continue
                         result = await _run_named_tool(ws, name, args or {}, job, agent, broadcast)
+                        if name == "look_at" and not _catalog.model_accepts_images(used_model):
+                            import eyes as vision
+
+                            result = vision.look_at(ws, str((args or {}).get("path") or ""), False)
                         messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": call.get("id") or name,
                                 "name": name,
-                                "content": result[:12_000],
+                                "content": result[:48_000],
                             }
                         )
+                        if name == "look_at" and _catalog.model_accepts_images(used_model):
+                            rel = str((args or {}).get("path") or "")
+                            if rel:
+                                messages.append(_catalog.user_with_images(f"This is {rel}.", ws, [rel]))
                     local.materialize_site(ws, content)
-                    gap = local.site_gap(ws)
+                    gap = _desk_gap(ws, prompt, salvage=_round_i >= 6)
                     if gap:
                         messages.append({"role": "user", "content": gap})
                         allow_tools = True
@@ -1758,7 +2222,7 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                     leftover = await _save_desk_files(content, content, ws, job, agent, broadcast)
                     transcripts = []
                 if transcripts:
-                    gap = local.site_gap(ws)
+                    gap = _desk_gap(ws, prompt, salvage=_round_i >= 6)
                     if gap:
                         messages.append({"role": "user", "content": gap})
                         allow_tools = True
@@ -1784,7 +2248,7 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                         output_parts.append(leftover)
                         if not pump.streamed:
                             pump.push(leftover, "text")
-                gap = local.site_gap(ws)
+                gap = _desk_gap(ws, prompt, salvage=_round_i >= 6)
                 if gap:
                     messages.append({"role": "user", "content": gap})
                     allow_tools = True
@@ -1805,7 +2269,7 @@ async def run_job(job_id: str, broadcast: Broadcast) -> None:
                     try:
                         data, used_model = await _complete_with_failover(
                             [
-                                {"role": "system", "content": _system_prompt(agent)},
+                                {"role": "system", "content": _system_prompt(agent, prompt=prompt)},
                                 {
                                     "role": "user",
                                     "content": f"{prompt}\n\nWrite the finished answer now in complete sentences. No thinking. No tools.",

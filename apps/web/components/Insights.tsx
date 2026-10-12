@@ -20,6 +20,10 @@ type Stats = {
   }[];
   today: { id: string; agent_id: string; status: string; caption: string; at: string }[];
   totals: { jobs: number; done: number; blocked: number };
+  routing?: {
+    critic_skipped?: number;
+    desks?: { id: string; name: string; win: number; n: number; preferred?: string | null }[];
+  };
 };
 
 export function Insights() {
@@ -63,6 +67,22 @@ export function Insights() {
               ))}
             </div>
           </div>
+          {stats.routing?.desks && stats.routing.desks.length > 0 && (
+            <div>
+              <p className="mb-2 text-[11px] uppercase tracking-[0.16em] text-[var(--ink-soft)]">Routing</p>
+              <div className="grid gap-2">
+                {stats.routing.desks.map((desk) => (
+                  <p key={desk.id} className="text-sm text-[var(--ink-soft)]">
+                    {desk.name}: {Math.round((desk.win || 0) * 100)}% win
+                    {desk.preferred ? ` · prefers ${desk.preferred}` : ""}
+                    {typeof stats.routing?.critic_skipped === "number" && stats.routing.critic_skipped > 0
+                      ? ` · critic skipped`
+                      : ""}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
           <div>
             <p className="mb-2 text-[11px] uppercase tracking-[0.16em] text-[var(--ink-soft)]">Plant</p>
             <p className="text-sm text-[var(--ink-soft)]">

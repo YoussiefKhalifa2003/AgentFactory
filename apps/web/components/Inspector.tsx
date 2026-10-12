@@ -1,11 +1,12 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, DragEvent, ClipboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Mic } from "lucide-react";
 import { useFactory } from "@/lib/factory";
 import { API_URL, Artifact, Job, ListItem, STRENGTHS } from "@/lib/types";
 import { splitPacks, useSkillCatalog } from "@/lib/skills";
-import { taskTitle } from "@/lib/tasks";
+import { pickBestAgent, taskTitle } from "@/lib/tasks";
 import { RichText } from "@/lib/rich-text";
 import { ModelPicker } from "./ModelPicker";
 import { portraitFor, randomLook } from "@/lib/look";
@@ -13,6 +14,23 @@ import { Chip } from "./ui/Chip";
 import { SegmentedControl } from "./ui/SegmentedControl";
 import { WorkTrace } from "./WorkTrace";
 import { Modal } from "./ui/Modal";
+import { parseVoiceCommand, resolveMeetingListId, speechAvailable, startListen } from "@/lib/voice";
+
+function isEyeFile(file: File) {
+  const t = (file.type || "").toLowerCase();
+  const n = file.name.toLowerCase();
+  return t.startsWith("image/") || t === "application/pdf" || /\.(png|jpe?g|webp|gif|pdf)$/.test(n);
+}
+
+function criticLine(trace: { kind?: string; detail?: string; label?: string }[] | undefined) {
+  const ev = [...(trace || [])].reverse().find((e) =>
+    ["critic.passed", "critic.finding", "critic.skipped", "critic.started"].includes(e.kind || "")
+  );
+  if (!ev) return null;
+  if (ev.kind === "critic.skipped") return ev.detail || "No critic desk";
+  if (ev.kind === "critic.started") return "Critic reading the folder";
+  return ev.detail || ev.label || "Verdict";
+}
 
 function isNoise(job: Job) {
   if (job.status === "queued" || job.status === "thinking" || job.status === "tool") return false;
@@ -496,6 +514,9 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
   const { tools } = useSkillCatalog();
   const state = agent ? live[agent.id] : undefined;
   const [prompt, setPrompt] = useState("");
+  const [eyes, setEyes] = useState<File[]>([]);
+  const [listening, setListening] = useState(false);
+  const listenRef = useRef<{ stop: () => void } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [tray, setTray] = useState<ListItem[]>([]);
   const [handError, setHandError] = useState<string | null>(null);
@@ -578,14 +599,75 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
     );
   }
 
+  function addEyes(list: FileList | File[]) {
+    const next = [...list].filter(isEyeFile);
+    if (!next.length) return;
+    setEyes((prev) => [...prev, ...next].slice(0, 4));
+  }
+
   function onHand(e: FormEvent) {
     e.preventDefault();
-    if (!prompt.trim()) return;
-    const text = prompt.trim();
+    if (!prompt.trim() && !eyes.length) return;
+    const text = prompt.trim() || (eyes.length ? "Look at this" : "");
     setHandError(null);
-    assignWork({ agentId: agent.id, text, listId: writableListId(openListId) })
-      .then(() => setPrompt(""))
+    assignWork({
+      agentId: agent.id,
+      text,
+      listId: writableListId(openListId),
+      files: eyes.length ? eyes : undefined,
+    })
+      .then(() => {
+        setPrompt("");
+        setEyes([]);
+      })
       .catch((err) => setHandError(err instanceof Error ? err.message : "Could not assign"));
+  }
+
+  function onPasteField(e: ClipboardEvent<HTMLFormElement>) {
+    const files = [...(e.clipboardData?.files || [])].filter(isEyeFile);
+    if (!files.length) return;
+    e.preventDefault();
+    addEyes(files);
+  }
+
+  function onDropField(e: DragEvent<HTMLFormElement>) {
+    const files = [...(e.dataTransfer?.files || [])].filter(isEyeFile);
+    if (!files.length) return;
+    e.preventDefault();
+    addEyes(files);
+  }
+
+  async function applyVoice(raw: string) {
+    const intent = parseVoiceCommand(raw, agents);
+    if (intent.action === "none") return;
+    if (intent.action === "cancel") {
+      if (job?.id) {
+        await fetch(`${API_URL}/api/jobs/${job.id}/cancel`, { method: "POST" });
+      }
+      return;
+    }
+    const listId = await resolveMeetingListId(API_URL, intent.meeting, writableListId(openListId));
+    const target = intent.agentId || pickBestAgent(agents, "coding")?.id || agent.id;
+    await assignWork({ agentId: target, text: intent.text, listId });
+  }
+
+  function holdMic() {
+    if (!speechAvailable() || listening) return;
+    setListening(true);
+    listenRef.current = startListen({
+      onInterim: (t) => setPrompt(t),
+      onFinal: (t) => {
+        setPrompt(t);
+        applyVoice(t).catch((err) => setHandError(err instanceof Error ? err.message : "Could not assign"));
+      },
+      onEnd: () => setListening(false),
+    });
+  }
+
+  function releaseMic() {
+    listenRef.current?.stop();
+    listenRef.current = null;
+    setListening(false);
   }
 
   async function stopJob() {
@@ -694,6 +776,12 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
                 tokens={Math.max(1, (state?.tokens || "").length / 4)}
                 model={agent.model}
               />
+            )}
+            {criticLine(trace) && (
+              <p className="rounded-2xl bg-white/80 px-3 py-2 text-sm">
+                <span className="text-[11px] uppercase tracking-[0.16em] text-[var(--ink-soft)]">Verdict</span>
+                <span className="mt-1 block">{criticLine(trace)}</span>
+              </p>
             )}
             {thread.length === 0 && (
               <p className="text-sm text-[var(--ink-soft)]">
@@ -914,16 +1002,46 @@ export function Inspector({ compact = false }: { compact?: boolean }) {
         )}
       </div>
 
-      <form onSubmit={onHand} className="mt-4 flex shrink-0 gap-2">
-        <input
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder={`Hand ${agent.name} a task`}
-          className="flex-1 rounded-full bg-white/70 px-4 py-2 text-sm outline-none"
-        />
-        <button type="submit" className="btn btn-solid" disabled={working}>
-          {working ? `${waiting.length ? waiting.length + 1 : ""} Working` : "Assign"}
-        </button>
+      <form
+        onSubmit={onHand}
+        onPaste={onPasteField}
+        onDrop={onDropField}
+        onDragOver={(e) => {
+          if ([...e.dataTransfer.types].includes("Files")) e.preventDefault();
+        }}
+        className="mt-4 flex shrink-0 flex-col gap-2"
+      >
+        {eyes.length > 0 && (
+          <p className="truncate text-[11px] text-[var(--ink-soft)]">
+            {eyes.map((f) => f.name).join(", ")}
+            <button type="button" className="ml-2 underline" onClick={() => setEyes([])}>
+              clear
+            </button>
+          </p>
+        )}
+        <div className="flex gap-2">
+          <input
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder={`Hand ${agent.name} a task`}
+            className="flex-1 rounded-full bg-white/70 px-4 py-2 text-sm outline-none"
+          />
+          {speechAvailable() && (
+            <button
+              type="button"
+              className={`btn ${listening ? "btn-solid" : ""}`}
+              aria-label="Hold to talk"
+              onPointerDown={holdMic}
+              onPointerUp={releaseMic}
+              onPointerLeave={releaseMic}
+            >
+              <Mic size={16} />
+            </button>
+          )}
+          <button type="submit" className="btn btn-solid" disabled={working}>
+            {working ? `${waiting.length ? waiting.length + 1 : ""} Working` : "Assign"}
+          </button>
+        </div>
       </form>
       {handError && <p className="mt-2 text-xs text-[var(--alert)]">{handError}</p>}
       <Modal open={confirmRemove} onClose={() => setConfirmRemove(false)} title={`Remove ${agent.name}?`}>

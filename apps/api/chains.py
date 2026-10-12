@@ -22,10 +22,30 @@ VIEW_SUFFIX = {
     ".svg",
     ".webp",
     ".md",
+    ".js",
+    ".mjs",
+    ".json",
+    ".wav",
 }
 SKIP_NAMES = {"__pycache__", ".git"}
 CAP_BYTES = 2_000_000
+GAME_CAP_BYTES = 8_000_000
+CHAIN_MAX = 5
 Broadcast = Any
+
+
+def _inherit_cap(src: Path) -> int:
+    if (src / "js" / "main.js").exists() or (src / "js" / "net.js").exists():
+        return GAME_CAP_BYTES
+    for html in list(src.glob("*.html"))[:4]:
+        try:
+            import local as site
+
+            if site.looks_like_game(html.read_text(encoding="utf-8", errors="replace")):
+                return GAME_CAP_BYTES
+        except Exception:
+            continue
+    return CAP_BYTES
 
 
 def inherit_workspace(from_agent: str, from_job: str, to_agent: str, to_job: str) -> list[str]:
@@ -46,8 +66,9 @@ def inherit_workspace(from_agent: str, from_job: str, to_agent: str, to_job: str
     other = [row for row in files if row[1].suffix.lower() not in VIEW_SUFFIX]
     copied: list[str] = []
     used = 0
+    cap = _inherit_cap(src)
     for size, path in view + other:
-        if used + size > CAP_BYTES:
+        if used + size > cap:
             continue
         rel = path.relative_to(src)
         target = dest / rel
@@ -76,7 +97,7 @@ def start_from_assign(
 ) -> dict[str, Any]:
     steps = _normalize_steps(raw_steps)
     if not steps:
-        raise ValueError("chain needs 1 to 4 steps")
+        raise ValueError("chain needs 1 to 5 steps")
     project_id = db.project_for_list(item["list_id"])
     chain = db.create_chain(
         {
@@ -104,7 +125,7 @@ def start_from_assign(
 
 def _normalize_steps(raw_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for i, raw in enumerate(raw_steps[:4], start=1):
+    for i, raw in enumerate(raw_steps[:5], start=1):
         agent_id = raw.get("agent_id") or None
         strength = (raw.get("strength") or "ops").strip() or "ops"
         inherit = bool(raw.get("inherit", True))
@@ -239,6 +260,24 @@ def after_job(job: dict[str, Any], status: str, broadcast: Broadcast | None = No
     chain = db.get_chain(str(chain_id))
     if not chain:
         return
+    try:
+        import critic as eyes_last
+
+        if mapped in {"done", "blocked"} and eyes_last.maybe_retry(chain, step, {**job, "status": mapped}):
+            more = kick(str(chain_id))
+            if broadcast:
+                for nxt in more:
+                    broadcast({"type": "job.queued", "job": nxt})
+                _emit_chain(str(chain_id), broadcast)
+                _start_jobs(more, broadcast)
+            if chain.get("item_id"):
+                item = db.update_item(str(chain["item_id"]), status="working", job_id=job["id"])
+                if broadcast and item:
+                    broadcast({"type": "task.updated", "item": item})
+            return
+    except Exception:
+        pass
+    chain = db.get_chain(str(chain_id)) or chain
     if mapped == "done":
         try:
             import memory

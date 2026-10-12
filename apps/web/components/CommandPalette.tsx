@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useFactory } from "@/lib/factory";
 import { pickBestAgent } from "@/lib/tasks";
 import { API_URL } from "@/lib/types";
+import { parseVoiceCommand, resolveMeetingListId, speechAvailable, startListen } from "@/lib/voice";
 
 export function CommandPalette() {
   const {
@@ -19,6 +20,7 @@ export function CommandPalette() {
     closeStage,
     setInsightsOpen,
     setGalleryOpen,
+    setBrainOpen,
     shift,
   } = useFactory();
   const router = useRouter();
@@ -127,6 +129,52 @@ export function CommandPalette() {
               }}
             >
               New agent
+            </Command.Item>
+            <Command.Item
+              value="listen mic voice"
+              className="cursor-pointer rounded-xl px-3 py-2 text-sm data-[selected=true]:bg-[var(--paper-deep)]"
+              onSelect={() => {
+                if (!speechAvailable()) return;
+                startListen({
+                  onFinal: (text) => {
+                    const intent = parseVoiceCommand(text, agents);
+                    if (intent.action === "cancel") {
+                      const named = intent.agentName
+                        ? agents.find((a) => a.name.toLowerCase() === intent.agentName.toLowerCase())
+                        : undefined;
+                      const live = jobs.find(
+                        (j) =>
+                          ["queued", "thinking", "tool"].includes(j.status) &&
+                          (!named || j.agent_id === named.id)
+                      );
+                      if (live?.id) fetch(`${API_URL}/api/jobs/${live.id}/cancel`, { method: "POST" });
+                      setPaletteOpen(false);
+                      return;
+                    }
+                    if (intent.action === "assign" && intent.text) {
+                      const best = intent.agentId
+                        ? agents.find((a) => a.id === intent.agentId)
+                        : pickBestAgent(agents, "coding");
+                      resolveMeetingListId(API_URL, intent.meeting).then((listId) => {
+                        if (best) assignWork({ agentId: best.id, text: intent.text, listId }).catch(() => undefined);
+                      });
+                    }
+                    setPaletteOpen(false);
+                  },
+                });
+              }}
+            >
+              Listen
+            </Command.Item>
+            <Command.Item
+              value="open brain"
+              className="cursor-pointer rounded-xl px-3 py-2 text-sm data-[selected=true]:bg-[var(--paper-deep)]"
+              onSelect={() => {
+                setBrainOpen(true);
+                setPaletteOpen(false);
+              }}
+            >
+              Open brain
             </Command.Item>
             <Command.Item
               value="insights"

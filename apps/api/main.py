@@ -12,11 +12,12 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import db
+import games as game_relay
 import harness
 import lists
 import llm
@@ -184,6 +185,19 @@ class AssignIn(BaseModel):
     chain: list[ChainStepIn] | None = None
 
 
+class BrainIn(BaseModel):
+    organization: str | None = None
+    wiki_url: str | None = None
+    wiki_md: str | None = None
+    project_names: list[str] | None = None
+    poll_enabled: bool | None = None
+
+
+class BrainDiscoverIn(BaseModel):
+    url: str | None = None
+    organization: str | None = None
+
+
 @app.on_event("startup")
 async def startup() -> None:
     global loop
@@ -214,6 +228,22 @@ async def startup() -> None:
                 harness.track_job(job["id"], asyncio.create_task(harness.run_job(job["id"], broadcast)))
     except Exception:
         pass
+    try:
+        import brain as plant_brain
+
+        plant_brain.start_poller()
+    except Exception:
+        pass
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    try:
+        import brain as plant_brain
+
+        await plant_brain.stop_poller()
+    except Exception:
+        pass
 
 
 @app.get("/api/health")
@@ -225,8 +255,10 @@ async def health(ping: int = 0) -> dict[str, Any]:
     import repos
 
     local = await catalog.refresh_local()
-    spark = await catalog.refresh_spark()
-    await catalog.refresh_spark2()
+    spark: set[str] = set()
+    if not catalog.spark_busy():
+        spark = await catalog.refresh_spark()
+        await catalog.refresh_spark2()
     return {
         "ok": True,
         "zen": bool(os.getenv("OPENCODE_API_KEY")),
@@ -242,19 +274,83 @@ async def health(ping: int = 0) -> dict[str, Any]:
 
 @app.get("/api/plant")
 async def plant_snap() -> dict[str, Any]:
-    import catalog
     import plant
 
-    await catalog.refresh_spark()
-    await catalog.refresh_spark2()
     return plant.snapshot()
+
+
+@app.get("/api/brain")
+async def brain_snap() -> dict[str, Any]:
+    return db.get_brain_public()
+
+
+@app.put("/api/brain")
+async def brain_put(body: BrainIn) -> dict[str, Any]:
+    import brain as plant_brain
+
+    fields: dict[str, Any] = {}
+    org = (body.organization or "").strip()
+    wiki_url = body.wiki_url
+    if org and ("://" in org or "/" in org or org.lower().startswith("dev.azure.com")):
+        parsed = plant_brain.parse_azure_link(org)
+        if parsed.get("organization"):
+            org = parsed["organization"]
+        if parsed.get("kind") == "wiki" and wiki_url is None:
+            wiki_url = body.organization
+    if body.organization is not None:
+        fields["organization"] = org
+    if wiki_url is not None:
+        fields["wiki_url"] = wiki_url.strip()
+    if body.wiki_md is not None:
+        fields["wiki_md"] = body.wiki_md
+    if body.poll_enabled is not None:
+        fields["poll_enabled"] = body.poll_enabled
+    if fields:
+        db.put_brain(**fields)
+    if org or body.project_names is not None:
+        plant_brain.apply_selection(org or db.get_brain().get("organization") or "", body.project_names)
+    snap = db.get_brain_public()
+    broadcast({"type": "brain.updated", "brain": snap})
+    return snap
+
+
+@app.post("/api/brain/discover")
+async def brain_discover(body: BrainDiscoverIn) -> dict[str, Any]:
+    import brain as plant_brain
+
+    target = (body.url or body.organization or "").strip()
+    if not target:
+        raise HTTPException(400, "url or organization is required")
+    found = await asyncio.to_thread(plant_brain.discover, target)
+    snap = db.get_brain_public()
+    snap["projects_found"] = found.get("projects") or []
+    if found.get("sync_error"):
+        snap["sync_error"] = found["sync_error"]
+    if found.get("queued"):
+        plant_brain.schedule_ingest()
+    broadcast({"type": "brain.updated", "brain": snap})
+    return snap
+
+
+@app.post("/api/brain/sync")
+async def brain_sync() -> dict[str, Any]:
+    import brain as plant_brain
+
+    db.put_brain(studying=1, sync_error="Cloning every project and repo…")
+    snap = db.get_brain_public()
+    broadcast({"type": "brain.updated", "brain": snap})
+    plant_brain.schedule_ingest()
+    return snap
 
 
 @app.get("/api/models")
 async def models() -> dict[str, Any]:
     import catalog
 
-    return await catalog.snapshot()
+    try:
+        return await catalog.snapshot()
+    except Exception:
+        return catalog.fallback_snapshot()
 
 
 @app.get("/api/strengths")
@@ -408,14 +504,40 @@ async def agent_tray(agent_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/assign")
-async def assign_work(body: AssignIn) -> dict[str, Any]:
+async def assign_work(request: Request) -> dict[str, Any]:
+    ctype = (request.headers.get("content-type") or "").lower()
+    uploads: list[UploadFile] = []
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+        chain_raw = form.get("chain")
+        chain = None
+        if chain_raw:
+            try:
+                parsed = json.loads(str(chain_raw))
+                chain = parsed if isinstance(parsed, list) else None
+            except json.JSONDecodeError:
+                chain = None
+        body = AssignIn(
+            item_id=str(form.get("item_id") or "") or None,
+            list_id=str(form.get("list_id") or "") or None,
+            text=str(form.get("text") or "") or None,
+            agent_id=str(form.get("agent_id") or "") or None,
+            foreman=str(form.get("foreman") or "").lower() in {"1", "true", "yes"},
+            chain=chain,
+        )
+        for item in form.getlist("files") + form.getlist("files[]"):
+            if hasattr(item, "read"):
+                uploads.append(item)  # type: ignore[arg-type]
+    else:
+        payload = await request.json()
+        body = AssignIn.model_validate(payload)
     try:
         result = lists.assign(
             item_id=body.item_id,
             list_id=body.list_id,
             text=body.text,
             agent_id=body.agent_id,
-            chain=[step.model_dump() for step in body.chain] if body.chain else None,
+            chain=[step.model_dump() if hasattr(step, "model_dump") else step for step in body.chain] if body.chain else None,
             foreman=body.foreman,
         )
     except KeyError:
@@ -425,6 +547,24 @@ async def assign_work(body: AssignIn) -> dict[str, Any]:
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
     jobs = result.get("jobs") or ([result["job"]] if result.get("job") else [])
+    if uploads:
+        import eyes as vision
+
+        first = next((j for j in jobs if j), None)
+        if first:
+            try:
+                written = await vision.save_uploads(first, uploads)
+                if written:
+                    harness._trace(
+                        first["id"],
+                        first["agent_id"],
+                        "eyes.added",
+                        broadcast,
+                        label="Eyes",
+                        detail=", ".join(written)[:180],
+                    )
+            except Exception as e:
+                raise HTTPException(400, str(e)) from e
     seen: set[str] = set()
     for job in jobs:
         if not job or job["id"] in seen:
@@ -556,6 +696,11 @@ SITE_MIME = {
     ".ogg": "audio/ogg",
     ".woff": "font/woff",
     ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".wasm": "application/wasm",
+    ".glb": "model/gltf-binary",
+    ".gltf": "model/gltf+json",
 }
 
 
@@ -566,12 +711,49 @@ async def job_site(job_id: str, path: str, request: Request):
         raise HTTPException(404, "job not found")
     rel = (path or "").strip() or "index.html"
     ws = sandbox.workspace(job["agent_id"], job_id)
+    suffix_early = Path(rel).suffix.lower()
+    if suffix_early in {".html", ".htm", ""}:
+        try:
+            local.finish_site(ws, str(job.get("prompt") or ""))
+        except Exception:
+            pass
     try:
         full = sandbox.resolve(ws, rel)
     except ValueError:
         raise HTTPException(404, "invalid path") from None
+    empty_headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
     if not full.is_file():
-        raise HTTPException(404, "file missing")
+        suffix_hint = Path(rel).suffix.lower()
+        if suffix_hint in {".js", ".mjs"}:
+            return Response(
+                "/* missing */",
+                media_type="text/javascript; charset=utf-8",
+                headers=empty_headers,
+            )
+        if suffix_hint == ".css":
+            return Response(
+                "/* missing */",
+                media_type="text/css; charset=utf-8",
+                headers=empty_headers,
+            )
+        if suffix_hint in {".json", ".glb", ".gltf", ".wasm"}:
+            raise HTTPException(404, "file missing")
+        if suffix_hint in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            return Response(
+                local.placeholder_png(),
+                media_type=SITE_MIME.get(suffix_hint, "image/png"),
+                headers=empty_headers,
+            )
+        if suffix_hint in {".wav", ".mp3", ".ogg"}:
+            return Response(b"", media_type=SITE_MIME.get(suffix_hint, "application/octet-stream"), headers=empty_headers)
+        if suffix_hint == ".svg":
+            return Response(local.PLACEHOLDER_SVG, media_type="image/svg+xml", headers=empty_headers)
+        if suffix_hint in {".woff", ".woff2", ".ttf", ".otf", ".ico"}:
+            return Response(b"", media_type=SITE_MIME.get(suffix_hint, "application/octet-stream"), headers=empty_headers)
+        return Response(b"", media_type=SITE_MIME.get(suffix_hint, "application/octet-stream"), headers=empty_headers)
     suffix = full.suffix.lower()
     mime = SITE_MIME.get(suffix) or mimetypes.guess_type(str(full))[0] or "application/octet-stream"
     headers = {
@@ -581,7 +763,7 @@ async def job_site(job_id: str, path: str, request: Request):
     if suffix in {".html", ".htm"}:
         raw = full.read_text(encoding="utf-8", errors="replace")
         base = str(request.base_url).rstrip("/") + f"/api/jobs/{job_id}/site/"
-        html = local.playable_page(ws, raw, base=base)
+        html = local.playable_page(ws, raw, base=base, job_id=job_id)
         return HTMLResponse(html, media_type="text/html; charset=utf-8", headers=headers)
     return FileResponse(
         full,
@@ -620,6 +802,68 @@ async def cancel_job(job_id: str) -> dict[str, Any]:
     if not harness.request_cancel(job_id, broadcast):
         raise HTTPException(409, "job is not running")
     return {"ok": True, "id": job_id}
+
+
+@app.post("/api/jobs/{job_id}/eyes")
+async def add_job_eyes(job_id: str, files: list[UploadFile] = File(default=[])) -> dict[str, Any]:
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    if job.get("status") not in {"queued", "thinking", "tool", "done", "blocked"}:
+        raise HTTPException(409, "job cannot take files")
+    import eyes as vision
+
+    try:
+        written = await vision.save_uploads(job, files)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if written:
+        harness._trace(
+            job_id,
+            job["agent_id"],
+            "eyes.added",
+            broadcast,
+            label="Eyes",
+            detail=", ".join(written)[:180],
+        )
+        broadcast({"type": "job.file", "jobId": job_id, "agentId": job["agent_id"], "files": written})
+    return {"ok": True, "files": written}
+
+
+@app.post("/api/coach/reset")
+async def coach_reset(agent_id: str | None = None) -> dict[str, Any]:
+    import coach
+
+    coach.reset(agent_id)
+    return {"ok": True, "agent_id": agent_id}
+
+
+@app.websocket("/api/games/{job_id}/ws")
+async def game_socket(ws: WebSocket, job_id: str) -> None:
+    if FOUNDRY_TOKEN:
+        if game_relay.token_from_ws(ws) != FOUNDRY_TOKEN:
+            await ws.close(code=1008)
+            return
+    job = db.get_job(job_id)
+    if not job:
+        await ws.close(code=1008)
+        return
+    if game_relay.hub.full(job_id):
+        await ws.close(code=1013)
+        return
+    await ws.accept()
+    game_relay.hub.add(job_id, ws)
+    try:
+        while True:
+            raw = await ws.receive_text()
+            if not game_relay.message_ok(raw):
+                await ws.send_text('{"error":"too large"}')
+                continue
+            await game_relay.hub.broadcast(job_id, raw, ws)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        game_relay.hub.discard(job_id, ws)
 
 
 @app.get("/api/chains/{chain_id}")
@@ -704,6 +948,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     "agents": db.list_agents(),
                     "jobs": db.in_flight_jobs(),
                     "plant": __import__("plant").snapshot(),
+                    "brain": db.get_brain_public(),
                 }
             )
         )
